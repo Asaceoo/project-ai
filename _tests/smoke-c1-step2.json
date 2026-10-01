@@ -1,0 +1,34 @@
+{
+ "readyState": "complete",
+ "dbReady": true,
+ "dataReady": true,
+ "idbExists": "object",
+ "dbErrMsg": null,
+ "migFlag": null,
+ "idbLsNow": "{\"probe\":\"yes\",\"ls\":{\"t\":1790273417357,\"len\":51986,\"head\":\"{\\\"products\\\":[{\\\"id\\\":\\\"p1\\\",\\\"name\\\":\\\"冒烟验证-改名925银镀金锁骨链\\\",\\\"cat\\\":\\\"首饰\\\",\\\"platform\\\":\\\"Amazon\\\"\"},\"wr\":\"write-ok\"}",
+ "memLsNow": {
+  "t": 1790273417357,
+  "has": true
+ },
+ "storeLogs": [
+  {
+   "t": "2026-09-25 02:10:17",
+   "l": "info",
+   "m": "store",
+   "g": "IndexedDB 数据较本地新，已重载（本地镜像容量满时可能落后）",
+   "d": ""
+  },
+  {
+   "t": "2026-09-25 02:10:17",
+   "l": "info",
+   "m": "store",
+   "g": "存储迁移完成：localStorage → IndexedDB（1 个 key）",
+   "d": ""
+  }
+ ],
+ "markerRestored": true,
+ "product0": "冒烟验证-改名925银镀金锁骨链",
+ "lsMirror": true,
+ "ok": true,
+ "step": "2"
+}

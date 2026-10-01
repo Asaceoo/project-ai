@@ -1,0 +1,9 @@
+{
+ "idbExists": "object",
+ "readyState": "complete",
+ "openCall": "opened",
+ "diagOk": true,
+ "diagErr": null,
+ "dbReady": true,
+ "dbErr": null
+}

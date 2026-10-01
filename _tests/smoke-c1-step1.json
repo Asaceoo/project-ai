@@ -1,0 +1,15 @@
+{
+ "readyState": "complete",
+ "dbReady": true,
+ "dataReady": true,
+ "idbExists": "object",
+ "dbErrMsg": null,
+ "seedProducts": 50,
+ "lsHasBefore": false,
+ "changed": "p1|冒烟验证-改名925银镀金锁骨链",
+ "memHas": true,
+ "dbHas": "{\"probe\":\"yes\",\"ls\":{\"t\":1790273404993,\"len\":51897,\"head\":\"{\\\"products\\\":[{\\\"id\\\":\\\"p1\\\",\\\"name\\\":\\\"冒烟验证-改名925银镀金锁骨链\\\",\\\"cat\\\":\\\"首饰\\\",\\\"platform\\\":\\\"Amazon\\\"\"},\"wr\":\"write-ok\"}",
+ "lsRemoved": true,
+ "ok": true,
+ "step": "1"
+}

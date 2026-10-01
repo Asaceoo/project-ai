@@ -1,0 +1,28 @@
+# 构建产物
+dist/
+build/
+SupplyDevLocal-*.spec
+
+# 测试运行产物（冒烟 exe/日志/截图缓存）
+_tests/smoke-*/
+_tests/shots/
+_tests/__pycache__/
+_tests/*.log
+_tests/tmp_*.js
+
+# 真机验证截图（体积大，不入库）
+_shots/
+
+# 工作区/代理数据
+.workbuddy/
+.box-agent/
+.box-agent-scratch/
+file/
+
+# 含本机 token 的端口备份脚本（敏感，勿上传）
+bkport.js
+
+# 会话粘贴的临时截图
+/*.png
+chrome_err.log
+file/
