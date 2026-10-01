@@ -17,7 +17,7 @@ _shots/
 .workbuddy/
 .box-agent/
 .box-agent-scratch/
-file/
+file
 
 # 含本机 token 的端口备份脚本（敏感，勿上传）
 bkport.js
@@ -25,6 +25,6 @@ bkport.js
 # 会话粘贴的临时截图
 /*.png
 chrome_err.log
-file/
+file
 __pycache__/
 *.pyc
