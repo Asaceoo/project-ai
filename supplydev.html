@@ -186,6 +186,10 @@ tr.arch td{color:var(--gray-light)}
 @media(max-width:900px){.kpis{grid-template-columns:repeat(2,1fr)}.side{display:none}.search{width:140px}.gantt-left{width:200px}}
 /* ===== C8 打印报表（v1.0.40）：#print-root 打印专用 DOM，固定黑白灰配色不随主题 ===== */
 #print-root{display:none}
+/* ===== C31 甘特拖放（v1.0.62）：拖拽中全局抓取光标+禁选中文本，浮动日期提示 ===== */
+#pg-drag-tip{position:fixed;z-index:9999;background:var(--ink);color:var(--on-accent);font-size:11px;padding:3px 8px;border-radius:4px;pointer-events:none;box-shadow:var(--shadow);white-space:nowrap}
+body.pg-dragging{cursor:grabbing!important}
+body.pg-dragging *{cursor:grabbing!important;user-select:none!important}
 @media print{
   body{background:#fff!important} /* 暗色主题下打印兜底：强制白底，防深色背景被打印 */
   body>*:not(#print-root){display:none!important}
@@ -444,7 +448,7 @@ function collectOverdue(){
   var arr=[];
   function _done(p){return p&&(p.status==='已完工'||p.status==='已归档')}
   state.orders.forEach(function(o){var d=diffDays(orderDue(o));if(d<0&&o.step<4&&!_done(byId(state.products,o.productId)))arr.push({type:'订单',name:esc(o.code),where:esc(pname(o.productId))+' · '+esc(sname(o.supplierId)),due:orderDue(o),days:-d,act:OV_ACT.order,nav:'order'})});
-  (state.milestones||[]).forEach(function(m){if(!m.date||m.status==='已完成'||_done(byId(state.products,m.productId)))return;var d=diffDays(m.date);if(d<0)arr.push({type:'里程碑',name:esc(m.name),where:esc(pname(m.productId)),due:m.date,days:-d,act:OV_ACT.milestone,pid:m.productId})});
+  (state.milestones||[]).forEach(function(m){if(!m.date||m.status==='已完成'||_done(byId(state.products,m.productId))||m.kind==='group')return; /* C22：分组无业务日期语义 */var d=diffDays(m.date);if(d<0)arr.push({type:'里程碑',name:esc(m.name),where:esc(pname(m.productId)),due:m.date,days:-d,act:OV_ACT.milestone,pid:m.productId})});
   state.samples.forEach(function(sa){if(!sa.due||sa.status!=='样品寄出'||_done(byId(state.products,sa.productId)))return;var d=diffDays(sa.due);if(d<0)arr.push({type:'打样',name:'第'+sa.round+'轮打样',where:esc(pname(sa.productId))+' · '+esc(sname(sa.supplierId)),due:sa.due,days:-d,act:OV_ACT.sample,nav:'product'})});
   state.actions.forEach(function(a){if(!a.due||a.status!=='进行中')return;var d=diffDays(a.due);if(d<0)arr.push({type:'整改',name:esc(a.title),where:esc(sname(a.supplierId)),due:a.due,days:-d,act:OV_ACT.action,nav:'quality'})});
   (state.certs||[]).forEach(function(c){if(!c.expire)return;var d=diffDays(c.expire);if(d<0)arr.push({type:'证书',name:esc(c.type),where:esc(sname(c.supplierId)),due:c.expire,days:-d,act:OV_ACT.cert,nav:'supplier'})});
@@ -694,13 +698,25 @@ function runImportRows(kind,rows,st,mode){
             var msid=String(cell(cells,'产品ID')||'').trim();
             var msname=String(cell(cells,'里程碑名称')||'').trim();
             var msdate=csvDate(cell(cells,'日期'),'');
+            var mstype=String(cell(cells,'类型')||'').trim(); /* C22：里程碑/阶段分组 */
+            var msend=csvDate(cell(cells,'结束日期'),'');
+            var msparent=String(cell(cells,'父阶段')||'').trim();
             if(!msid||!msname){errors.push('第'+rowNo+'行：缺产品ID或里程碑名称');return}
             needP(msid,rowNo);
             if(errors.length&&errors[errors.length-1].indexOf('第'+rowNo)===0){return}
-            if(!msdate){errors.push('第'+rowNo+'行：日期无效');return}
+            var msIsG=mstype==='阶段分组'||mstype==='group';
+            var msIsT=mstype==='任务'||mstype==='task'; /* C27：任务=工期条形态，与里程碑同权 */
+            if(!msdate&&!msIsG){errors.push('第'+rowNo+'行：日期无效');return}
+            if(msdate&&msend&&msend<=msdate){errors.push('第'+rowNo+'行：结束日期需晚于日期');return}
+            if(msIsT&&!msend){errors.push('第'+rowNo+'行：任务需要结束日期');return}
             if(state.milestones.some(function(m){return m.productId===msid&&m.name===msname})){skipped++;return}
+            var msPid='';
+            if(msparent){var pm2=(state.milestones||[]).filter(function(m){return m.productId===msid&&m.kind==='group'&&(m.id===msparent||m.name===msparent)})[0];
+              if(!pm2){errors.push('第'+rowNo+'行：父阶段不存在或不是分组（'+msparent+'）');return}
+              msPid=pm2.id}
             var msst=cell(cells,'状态')||'未开始';
-            state.milestones.push({id:nextId(state.milestones,'ms'),productId:msid,name:msname,date:msdate,status:['未开始','进行中','已完成'].indexOf(msst)>=0?msst:'未开始',desc:cell(cells,'说明')||'',color:cell(cells,'颜色')||'#165DFF'});
+            state.milestones.push({id:nextId(state.milestones,'ms'),productId:msid,name:msname,date:msdate,status:msIsG?'未开始':(['未开始','进行中','已完成'].indexOf(msst)>=0?msst:'未开始'),desc:cell(cells,'说明')||'',color:cell(cells,'颜色')||'#165DFF',kind:msIsG?'group':(msIsT?'task':''),parentId:msIsG?'':msPid,endDate:(msIsG||!msend||msend<=msdate)?'':msend}); /* C22：分组强制顶层；C27：任务 */
+            wbsUnfold(msPid); /* C30：导入到折叠分组的行自动展开 */
             added++;
           }else if(kind==='deps'){
             var df=String(cell(cells,'前置产品ID')||'').trim();
@@ -712,8 +728,8 @@ function runImportRows(kind,rows,st,mode){
             needP(df,rowNo);needP(dtf,rowNo);
             if(!DEP_TYPES[dty]){errors.push('第'+rowNo+'行：依赖类型无效 '+dty);return}
             if(errors.length&&errors[errors.length-1].indexOf('第'+rowNo)===0){return}
-            var fm=(state.milestones||[]).filter(function(m){return m.productId===df&&m.name===dn})[0];
-            var tm=(state.milestones||[]).filter(function(m){return m.productId===dtf&&m.name===dtn})[0];
+            var fm=(state.milestones||[]).filter(function(m){return m.productId===df&&m.name===dn&&m.kind!=='group'})[0]; /* C22：分组不参与依赖 */
+            var tm=(state.milestones||[]).filter(function(m){return m.productId===dtf&&m.name===dtn&&m.kind!=='group'})[0]; /* C22：分组不参与依赖 */
             if(!fm||!tm){errors.push('第'+rowNo+'行：里程碑不存在（'+df+'·'+dn+' → '+dtf+'·'+dtn+'）');return}
             if(fm.id===tm.id){errors.push('第'+rowNo+'行：自环依赖被拦截');return}
             if((state.deps||[]).some(function(x){return x.from===fm.id&&x.to===tm.id})){skipped++;return}
@@ -919,12 +935,14 @@ var logSearch='';
 function openLogViewer(){
   var lv='all';
   var mods=[];LOGS.forEach(function(e){if(e.m&&mods.indexOf(e.m)<0)mods.push(e.m)}); /* C10：按模块筛选 chips（从现有日志动态收集） */
-  openModal('运行日志（当前 '+LOGS.length+' 条 · 落盘上限 500）',
+  var cnt={};LOGS.forEach(function(e){cnt[e.l]=(cnt[e.l]||0)+1}); /* C23：级别计数徽章 */
+  openModal('运行日志（当前 '+LOGS.length+' 条 · 落盘上限 '+LOG_CAP_DISK+' · 会话 '+LOG_SESSION.id+' · '+getAppVer()+'）',
   '<div style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap">'+
-  ['all','error','warn','info','debug'].map(function(l){return '<button class="btn ghost sm" onclick="logLvFilter=\''+l+'\';renderLogList()">'+(l==='all'?'全部':l.toUpperCase())+'</button>'}).join('')+
+  ['all','error','warn','info','debug'].map(function(l){return '<button class="btn ghost sm" onclick="logLvFilter=\''+l+'\';renderLogList()">'+(l==='all'?'全部':l.toUpperCase()+' '+(cnt[l]||0))+'</button>'}).join('')+
   '</div><div style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap;align-items:center"><span style="font-size:12px;color:var(--ink3)">模块</span>'+['all'].concat(mods).map(function(m){return '<button class="btn ghost sm" onclick="logModFilter=\''+m+'\';renderLogList()">'+(m==='all'?'全部':esc(m))+'</button>'}).join('')+'</div>'+
   '<input id="log-search" placeholder="搜索关键字..." oninput="logSearch=this.value;renderLogList()" style="padding:6px 10px;border:1px solid var(--line);border-radius:6px;font-size:13px;min-width:160px;flex:1">'+
   '<span style="flex:1"></span>'+
+  '<button class="btn ghost sm" onclick="exportDiagnostics()" title="日志+审计+环境一键打包，发这个文件即可定位问题">诊断包</button>'+
   '<button class="btn ghost sm" onclick="exportLogs()">导出</button>'+
   '<button class="btn ghost sm" onclick="clearLogs()">清空</button></div>'+
   '<div id="log-list" style="max-height:52vh;overflow:auto"></div>',
@@ -947,7 +965,7 @@ function renderLogList(){
   var el=document.getElementById('log-list');if(!el)return;
   el.innerHTML='<div style="font-size:12px;color:var(--ink3);margin-bottom:8px">命中 '+arr.length+' 条'+(kw?'（关键字「'+esc(logSearch)+'」）':'')+(lv!=='all'?'（级别 '+lv.toUpperCase()+'）':'')+(lm!=='all'?'（模块 '+esc(lm)+'）':'')+'</div>'+(arr.length?arr.map(function(e){
     var bg=e.l==='error'?'background:var(--warn-soft);':'';
-    return '<div style="padding:8px 0;border-bottom:1px solid var(--line);font-size:12px;'+bg+'"><div style="display:flex;gap:8px"><span style="color:'+(colors[e.l]||'#86909C')+';font-weight:700;flex:none">'+e.l.toUpperCase()+'</span><span style="color:var(--ink3);flex:none" class="tnum">'+esc(e.t)+'</span><span style="color:var(--ink3);flex:none">['+esc(e.m)+']</span></div><div style="margin-top:2px;word-break:break-all">'+esc(e.g)+'</div>'+(e.d?'<pre style="margin:4px 0 0;font-size:11px;color:var(--ink3);white-space:pre-wrap;word-break:break-all">'+esc(e.d)+'</pre>':'')+'</div>';
+    return '<div style="padding:8px 0;border-bottom:1px solid var(--line);font-size:12px;'+bg+'"><div style="display:flex;gap:8px"><span style="color:'+(colors[e.l]||'#86909C')+';font-weight:700;flex:none">'+e.l.toUpperCase()+'</span><span style="color:var(--ink3);flex:none" class="tnum" title="日志序号">#'+(e.q||0)+'</span><span style="color:var(--ink3);flex:none" class="tnum">'+esc(e.t)+'</span><span style="color:var(--ink3);flex:none">['+esc(e.m)+']</span></div><div style="margin-top:2px;word-break:break-all">'+esc(e.g)+'</div>'+(e.d?'<pre style="margin:4px 0 0;font-size:11px;color:var(--ink3);white-space:pre-wrap;word-break:break-all">'+esc(e.d)+'</pre>':'')+'</div>';
   }).join(''):'<div class="empty">暂无匹配日志</div>');
 }
 function exportLogs(){
@@ -964,6 +982,22 @@ function clearLogs(){
   LOGS=[];saveLogs();
   logLog('info','log','运行日志已清空');
   renderLogList();toast('日志已清空');
+}
+/* C23 一键诊断包：日志+审计尾+环境元数据单文件导出（对标 bugreport 惯例；不含任何业务数据与凭据） */
+function exportDiagnostics(){
+  saveLogs();
+  var pkg={app:'supplydev',ver:getAppVer(),exportedAt:nowDT(),session:LOG_SESSION,
+    env:{ua:navigator.userAgent,platform:navigator.platform||'',lang:navigator.language||'',screen:(screen.width||0)+'x'+(screen.height||0),
+      tz:(typeof Intl!=='undefined'&&Intl.DateTimeFormat)?(function(){try{return Intl.DateTimeFormat().resolvedOptions().timeZone||''}catch(e){return ''}})():'',
+      storage:(function(){try{var b=0;for(var i=0;i<localStorage.length;i++){var k=localStorage.key(i);if(k&&String(k).indexOf('supplydev_')===0)b+=String(localStorage.getItem(k)).length}return b}catch(e){return -1}})(), /* C23r2：标准 key(i) 接口计数（for-in 对 Storage 非标准） */
+      idb:typeof DB_READY!=='undefined'?!!DB_READY:null,bkport:typeof window.__BKPORT==='number'?window.__BKPORT:null}, /* C23r2：存储降级/备份通道定位字段 */
+    logStats:(function(){var c={};LOGS.forEach(function(e){c[e.l]=(c[e.l]||0)+1});return c})(),
+    logs:LOGS,auditTail:(state._audit||[]).slice(-50)};
+  var blob=new Blob([JSON.stringify(pkg,null,2)],{type:'application/json'});
+  var a=document.createElement('a');a.href=URL.createObjectURL(blob);
+  a.download='supplydev-diag-'+todayStr()+'-'+LOG_SESSION.id+'.json';a.click();
+  logLog('info','log','导出诊断包（'+LOGS.length+' 条日志 · 会话 '+LOG_SESSION.id+' · '+getAppVer()+'）');
+  toast('诊断包已导出（含日志 '+LOGS.length+' 条）');
 }
 /* 物料价格历史（D6）：改价自动记录，谈价时可追溯 */
 function recordPriceHistory(mid,oldPrice,newPrice,src){
@@ -995,7 +1029,11 @@ var LOG_KEY='supplydev_logs_v1';
 var LOGS=(function(){try{var a=JSON.parse(storeGet(LOG_KEY));return Array.isArray(a)?a:[]}catch(e){return[]}})();
 var LOG_LEVELS={debug:0,info:1,warn:2,error:3};
 var LOG_SHOW=LOG_LEVELS.info; /* 控制台输出阈值：info 及以上；全部级别都进内存/落盘 */
-function saveLogs(){storeSet(LOG_KEY,JSON.stringify(LOGS.slice(-500)))}
+var LOG_CAP_MEM=1000,LOG_CAP_DISK=800; /* C23：环形缓冲容量（内存/落盘），warn-error 立即落盘策略不变 */
+function getAppVer(){var m=(typeof document!=='undefined'&&document.title||'').match(/v(\d+\.\d+\.\d+)/);return m?('v'+m[1]):'dev'} /* C23：版本号从 app.py 窗口标题解析 */
+var LOG_SEQ=(function(){var mx=0;LOGS.forEach(function(e){if((e.q|0)>mx)mx=e.q|0});return mx+1})(); /* C23：自增序号（断点续号），稳定引用与排序 */
+var LOG_SESSION={id:Math.random().toString(36).slice(2,8),start:nowDT(),ver:getAppVer()}; /* C23：会话标识（对标 Sentry release/session 关联） */
+function saveLogs(){storeSet(LOG_KEY,JSON.stringify(LOGS.slice(-LOG_CAP_DISK)))}
 /* 联网时间同步：多源采样 → 中位数偏移 → 离群源自检 → 持久化偏移；失败回退本地时钟并周期重试 */
 function syncTime(){
   if(TIME_SYNCING)return;TIME_SYNCING=true;
@@ -1056,20 +1094,42 @@ function startClock(){
 function logLog(level,mod,msg,detail){
   if(_impPrev)return; /* C2 影子预跑：抑制全部日志写入，预览零副作用 */
   var lv=LOG_LEVELS[level]===undefined?1:LOG_LEVELS[level];
-  var e={t:nowDT(),l:level,m:String(mod||'app'),g:String(msg||''),d:detail?String(detail).slice(0,600):''};
+  var e={q:LOG_SEQ++,t:nowDT(),l:level,m:String(mod||'app'),g:String(msg||''),d:detail?String(detail).slice(0,600):''};
   LOGS.push(e);
-  if(LOGS.length>600)LOGS=LOGS.slice(-500);
+  if(LOGS.length>LOG_CAP_MEM)LOGS=LOGS.slice(-LOG_CAP_DISK);
   if(lv>=LOG_LEVELS.warn)saveLogs(); /* 警告/错误立即落盘；debug/info 由关键节点与 beforeunload 批量落盘 */
   if(lv>=LOG_SHOW){try{console[level==='warn'?'warn':level==='error'?'error':'log']('[ACE]['+e.m+'] '+e.g,e.d||'')}catch(_e){}}
 }
 function dbg(mod,msg,detail){logLog('debug',mod,msg,detail)}
 window.addEventListener('error',function(ev){
+  if(ev&&ev.target&&ev.target!==window)return; /* C29：资源加载错误由下方 capture 监听器单点处理，防双记录 */
   logLog('error','global','未捕获异常：'+(ev.message||''),(ev.error&&ev.error.stack)||'');
 });
 window.addEventListener('unhandledrejection',function(ev){
   var r=ev.reason||{};
   logLog('error','global','未处理的 Promise 拒绝：'+(r.message||r),(r&&r.stack)||(r&&r.reason&&r.reason.stack)||'');
 });
+/* C29 日志成熟化增量①：资源加载失败捕获（capture 阶段，target 为元素时是资源错误非脚本异常） */
+window.addEventListener('error',function(ev){
+  var t=ev&&ev.target;
+  if(!t||t===window)return; /* 无 target / window 级异常已由上方兜底处理 */
+  var src=t.src||t.href||'';
+  if(src.indexOf('data:')===0)return; /* 内联资源忽略 */
+  logLog('warn','global','资源加载失败：'+(t.tagName||'?')+' '+(src||'(无 src)').slice(0,200));
+},true);
+/* C29 日志成熟化增量②：console.error 桥接到运行日志（第三方/被动 catch 的错误不再只进控制台）；
+   _inLogConsole 防递归——logLog 自身的控制台输出不再回流 */
+(function(){
+  var _orig=console.error;
+  console.error=function(){
+    try{
+      var args=Array.prototype.slice.call(arguments);
+      var txt=args.map(function(a){return a instanceof Error?(a.message+'\n'+a.stack):String(a)}).join(' ').slice(0,600);
+      if(!window._inLogConsole){window._inLogConsole=true;try{logLog('error','console','console.error：'+txt)}finally{window._inLogConsole=false}}
+    }catch(_e){}
+    return _orig.apply(console,arguments);
+  };
+})();
 window.addEventListener('beforeunload',function(){try{flushPersist()}catch(e){}saveLogs()}); /* 数据安全：退出前立即落主状态（防抖窗口内未写盘的变更一并冲刷）+ 落日志（app.py closing 的 flushStore 随后等事务完成） */
 
 /* ===== 演示数据（日期相对今天动态生成） ===== */
@@ -1293,6 +1353,12 @@ function recomputeDerived(){
       recalcSupplierScore(s.id);
       if(s.qualityScore!==bq||s.deliveryScore!==bd||s.rating!==br)drift.score++;
     });
+    /* C24：孤儿 parentId 净化——父分组不存在/非分组/跨产品时上移顶层（JSON 导入等异常路径防线，防子项在 WBS 树中不可见） */
+    if(Array.isArray(state.milestones))state.milestones.forEach(function(m){
+      if(!m.parentId)return;
+      var g=byId(state.milestones,m.parentId);
+      if(!g||g.kind!=='group'||g.productId!==m.productId)m.parentId='';
+    });
     ensureMilestones();ensureDeps();
     return drift;
   }finally{_inRecompute=false}
@@ -1310,7 +1376,10 @@ function flushPersist(){
   if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null}
   if(_impPrev)return;
   if(!_inRecompute){try{recomputeDerived()}catch(e){logLog('error','sync','派生数据重算失败：'+e.message,e.stack)}}
+  var _t0=Date.now();
   storeSet(LS,JSON.stringify(state));
+  var _st=Date.now()-_t0; /* C23：慢落盘观测 */
+  if(_st>500)logLog('warn','store','主状态落盘耗时 '+_st+'ms（超 500ms 阈值，存储可能繁忙）');
   lastSaveAt=nowDT().slice(11,16);
   bkMarkChange(); /* C14：落盘成功即标记变更时间，周期备份据此判定「备份后是否有新变更」 */
 }
@@ -1333,7 +1402,8 @@ function openBOM(pid){
     state.bom.push(item);
     snapshotCost(true,pid);
     logAudit('新增BOM项：'+fv('f-name')+'（'+pname(pid)+'）');
-    persist();closeModal();toast(isAsm?'已新增半成品项，成本已递归计算':'已新增BOM项，成本快照已更新');renderCost(pid);
+    persist();closeModal();toast(isAsm?'已新增半成品项，成本已递归计算':'已新增BOM项，成本快照已更新'); /* C29：实时联动——成本路由局部刷新，其余路由（含项目详情成本 tab）全局重渲染，禁止再假设调用方是成本视图 */
+    if(ROUTE==='cost')renderCost(pid);else RENDER();
   });
 }
 /* C11：编辑BOM组成项（物料/工艺/用量/损耗，或半成品引用），保存后成本快照联动 */
@@ -1385,7 +1455,7 @@ function bomReachable(fromPid,targetPid,stack){
   delete stack[fromPid];
   return found;
 }
-function delBOM(id){if(!confirm('确定删除该BOM项？'))return;var b=byId(state.bom,id);state.bom=state.bom.filter(function(b){return b.id!==id});if(b){snapshotCost(true,b.productId);logAudit('删除BOM项：'+b.name+'（'+pname(b.productId)+'）')}persist();toast('已删除，成本快照已更新');if(state._costPid&&ROUTE==='cost')renderCost(state._costPid);else RENDER();}
+function delBOM(id){if(!confirm('确定删除该BOM项？'))return;var b=byId(state.bom,id);state.bom=state.bom.filter(function(b){return b.id!==id});if(b){snapshotCost(true,b.productId);logAudit('删除BOM项：'+b.name+'（'+pname(b.productId)+'）')}persist();toast('已删除，成本快照已更新'); /* C29：实时联动守卫（原 _costPid 死条件恒走 RENDER，统一为 ROUTE 判定） */if(b&&ROUTE==='cost')renderCost(b.productId);else RENDER();}
 function editSupplier(id){
   var s=byId(state.suppliers,id);if(!s)return;
   openModal('编辑供应商：'+s.name,
@@ -1565,7 +1635,7 @@ function globalSearch(v){
   state.orders.forEach(function(o){push('订单',o.id,o.code,pname(o.productId)+' × '+o.qty+' · '+o.status,'&#128203;','#0FC6C2')});
   state.issues.forEach(function(i){push('客诉',i.id,i.title,pname(i.productId||'')+' · '+i.status,'&#9888;','#F53F3F')});
   state.materials.forEach(function(m){push('物料',m.id,m.name,'$'+m.price+'/'+m.unit,'&#129514;','#86909C')});
-  (state.milestones||[]).forEach(function(ms){push('里程碑',ms.id,ms.name,pname(ms.productId)+' · '+ms.date,'&#9670;','#FF7D00')});
+  (state.milestones||[]).forEach(function(ms){if(ms.kind==='group')return;push('里程碑',ms.id,ms.name,pname(ms.productId)+' · '+(ms.date||'—'),'&#9670;','#FF7D00')}); /* C22：分组不进全局搜索 */
   /* C14：搜索盲区补全（原仅 6 类 → 12 类） */
   (state.quotes||[]).forEach(function(q){push('报价',q.id,pname(q.productId)+' 报价','¥'+q.price+' · MOQ '+q.moq+' · '+(q.status||''),'&#128176;','#00B42A')});
   (state.certs||[]).forEach(function(c){push('证书',c.id,(c.type||'资质证书'),sname(c.supplierId)+' · 到期 '+(c.expire||'—'),'&#128220;','#FF7D00')});
@@ -1647,7 +1717,7 @@ function exportModule(name,pid,ids){
     quotes:{headers:[{key:'id',label:'ID'},{key:'productId',label:'产品ID'},{key:'supplierId',label:'供应商ID'},{key:'price',label:'单价'},{key:'moq',label:'MOQ'},{key:'leadTime',label:'交期天数'},{key:'reqDate',label:'询价日期'},{key:'quoteDate',label:'报价日期'},{key:'status',label:'状态'},{key:'validity',label:'有效期'}],rows:state.quotes},
     inspections:{headers:[{key:'id',label:'ID'},{key:'date',label:'日期'},{key:'productId',label:'产品ID'},{key:'supplierId',label:'供应商ID'},{key:'checked',label:'抽检数'},{key:'bad',label:'不良数'},{key:'verdict',label:'判定'},{key:'note',label:'方案备注'}],rows:state.inspections},
     actions:{headers:[{key:'id',label:'ID'},{key:'title',label:'主题'},{key:'supplierId',label:'供应商ID'},{key:'owner',label:'责任人'},{key:'due',label:'截止'},{key:'completionRate',label:'完成率%'},{key:'status',label:'状态'}],rows:state.actions},
-    milestones:{headers:[{key:'id',label:'ID'},{key:'productId',label:'产品ID'},{key:'name',label:'里程碑名称'},{key:'date',label:'日期'},{key:'status',label:'状态'},{key:'desc',label:'说明'},{key:'color',label:'颜色'}],rows:state.milestones||[]},
+    milestones:{headers:[{key:'id',label:'ID'},{key:'productId',label:'产品ID'},{key:'name',label:'里程碑名称'},{key:'date',label:'日期'},{key:'endDate',label:'结束日期'},{key:'kind',label:'类型'},{key:'parentId',label:'父阶段'},{key:'status',label:'状态'},{key:'desc',label:'说明'},{key:'color',label:'颜色'}],rows:state.milestones||[]},
     deps:{headers:[{key:'fromPid',label:'前置产品ID'},{key:'fromMs',label:'前置里程碑'},{key:'type',label:'依赖类型'},{key:'toPid',label:'后继产品ID'},{key:'toMs',label:'后继里程碑'}],rows:(state.deps||[]).map(function(d){var fm=byId(state.milestones,d.from),tm=byId(state.milestones,d.to);return{fromPid:fm?fm.productId:'',fromMs:fm?fm.name:'',type:d.type,toPid:tm?tm.productId:'',toMs:tm?tm.name:''}})},
     catWeights:{headers:[{key:'cat',label:'品类'},{key:'quality',label:'质量权重'},{key:'delivery',label:'交期权重'},{key:'price',label:'价格权重'}],rows:Object.keys(state.catWeights||{}).map(function(c){return{cat:c,quality:state.catWeights[c].quality,delivery:state.catWeights[c].delivery,price:state.catWeights[c].price}})},
     certs:{headers:[{key:'supplierId',label:'供应商ID'},{key:'type',label:'类型'},{key:'expire',label:'到期日'},{key:'note',label:'备注'}],rows:(state.certs||[]).map(function(c){return{supplierId:c.supplierId,type:c.type,expire:c.expire,note:c.note||''}})}
@@ -1659,6 +1729,7 @@ function exportModule(name,pid,ids){
     var fk=PID_FILTER_KEYS[name];
     if(fk)rows=rows.filter(function(r){return r[fk]===pid});
   }
+  logAudit('导出 CSV：'+(MOD_NAMES[name]||name)+'（'+rows.length+' 行'+(pid?'，按当前项目过滤':'')+(ids?'，批量选中':'')+'）'); /* C23：导出打点 */
   toCSV(rows,c.headers,name);
   toast('已导出'+(MOD_NAMES[name]||name)+(pid&&rows.length!==c.rows.length?'（当前项目 '+rows.length+' 行）':(ids&&rows.length!==c.rows.length?'（选中 '+rows.length+' 行）':''))+' CSV');
 }
@@ -1775,12 +1846,12 @@ function bkPeriodicDue(now){
 /* 备份发送统一入口（启动备份与周期备份共用；禁止另起 fetch 实现） */
 function bkSendState(cb){
   cb=cb||function(){};
-  if(typeof window.__BKPORT!=='number'){cb(false);return}
+  if(typeof window.__BKPORT!=='number'){dbg('backup','备份通道未配置（bkport.js 缺失），跳过备份');cb(false);return} /* C23 */
   try{
     var r=fetch('http://127.0.0.1:'+window.__BKPORT+'/backup',{method:'POST',headers:{'Content-Type':'application/json','X-BK-Token':window.__BKTOKEN||''},body:JSON.stringify(state)});
-    if(r&&r.then)r.then(function(resp){cb(!!(resp&&resp.ok))}).catch(function(){cb(false)});
+    if(r&&r.then)r.then(function(resp){if(resp&&!resp.ok)logLog('warn','backup','备份通道返回 HTTP '+resp.status);cb(!!(resp&&resp.ok))}).catch(function(e2){logLog('error','backup','备份通道请求失败：'+(e2&&e2.message||e2));cb(false)}); /* C23：失败分级观测 */
     else cb(false);
-  }catch(e){cb(false)}
+  }catch(e){logLog('error','backup','备份发送异常：'+e.message);cb(false)}
 }
 /* 周期自动备份：每 5 分钟巡检一次（真正的门槛在 24h + 有变更，巡检只负责及时触发） */
 function startPeriodicBackup(){
@@ -1811,6 +1882,7 @@ function bkVerify(){
 /* 联动：客诉扣分、订单改产品状态、打样改产品状态 */
 function recalcSupplierScore(sid){
   var s=byId(state.suppliers,sid);if(!s)return;
+  dbg('score','评分重算：'+(s.name||sid)); /* C23：高频路径 debug 级 */
   var issues=state.issues.filter(function(i){return i.supplierId===sid});
   var open=issues.filter(function(i){return i.status==='待处理'||i.status==='调查中'}).length;
   var closed=issues.filter(function(i){return i.status==='已解决'||i.status==='已关闭'}).length;
@@ -1942,7 +2014,7 @@ async function pbkdf2Hex(pass,saltHex){ /* PBKDF2-SHA256 10 万迭代，替代�
   var bits=await crypto.subtle.deriveBits({name:'PBKDF2',hash:'SHA-256',salt:salt,iterations:100000},key,256);
   return Array.from(new Uint8Array(bits)).map(function(b){return b.toString(16).padStart(2,'0')}).join('')
 }
-function authUnlock(u){CUR_USER=u;$('#auth-mask').style.display='none';$('#foot-name').textContent=u;$('#foot-avatar').textContent=(u[0]||'U').toUpperCase();renderNav();RENDER();}
+function authUnlock(u){CUR_USER=u;logAudit('用户登录：'+u); /* C23：登录打点 */$('#auth-mask').style.display='none';$('#foot-name').textContent=u;$('#foot-avatar').textContent=(u[0]||'U').toUpperCase();renderNav();RENDER();}
 function authRender(){
   var sub=$('#auth-sub'),saved=localStorage.getItem(LS_AUTH);
   if(!saved){
@@ -1973,7 +2045,7 @@ function authRender(){
     };
   }
 }
-function authLogout(){$('#auth-err').textContent='';$('#auth-mask').style.display='flex';authRender()}
+function authLogout(){logAudit('用户登出：'+(CUR_USER||'未知')); /* C29：登出打点（登录已有） */$('#auth-err').textContent='';$('#auth-mask').style.display='flex';authRender()}
 
 /* ===== 导航与路由 ===== */
 var NAV=[
@@ -1995,7 +2067,7 @@ function renderNav(){
   }).join('');
   $('#tb-title').textContent=ROUTE==='project'?'项目详情':((NAV.filter(function(n){return n.id===ROUTE})[0]||{}).name||'');
 }
-function go(r){ROUTE=r;renderNav();RENDER()}
+function go(r){if(r!==ROUTE)dbg('nav','路由切换 '+ROUTE+' → '+r);ROUTE=r;renderNav();RENDER()} /* C23：导航轨迹 */
 /* ===== C17：下钻协议 + 项目汇总排序/健康度/批量操作 ===== */
 var _drill=null; /* 一次性下钻预设：{view:'order'|'projects',filter:'...'} 由目标视图消费后置空 */
 function goDrill(r,preset){_drill=preset||null;go(r)}
@@ -2121,7 +2193,7 @@ function ensureMilestones(){
 /* 产品字段日期变更时同步基线里程碑日期（仅当里程碑日期未被用户改过：与旧字段值一致才更新） */
 function msSyncDates(p,oldS,oldT){
   (state.milestones||[]).forEach(function(m){
-    if(m.productId!==p.id)return;
+    if(m.productId!==p.id||m.kind==='group')return; /* C22：分组无业务日期 */
     if(m.name==='打样截止'&&m.date===oldS&&p.sampleDue&&p.sampleDue!==oldS)m.date=p.sampleDue;
     if(m.name==='交付'&&m.date===oldT&&p.targetDate&&p.targetDate!==oldT)m.date=p.targetDate;
   });
@@ -2130,7 +2202,7 @@ function msSyncDates(p,oldS,oldT){
 function msRefillBaseline(p){
   msBaselineFor(p);
   (state.milestones||[]).forEach(function(m){
-    if(m.productId!==p.id||m.status==='已完成')return;
+    if(m.productId!==p.id||m.status==='已完成'||m.kind==='group')return; /* C22：分组无状态流转 */
     if(m.name==='打样截止'&&p.status!=='立项中'&&p.status!=='打样中')m.status='已完成';
     if(m.name==='样品确认'&&['已下单','生产中','已完工'].indexOf(p.status)>=0)m.status='已完成';
     if(m.name==='下单'&&(p.status==='生产中'||p.status==='已完工'))m.status='已完成';
@@ -2140,7 +2212,7 @@ function msRefillBaseline(p){
 /* ===== A3 计划基线快照：确认/下单时冻结里程碑日期，实际变更后偏差 >3 天黄 / >7 天红（基线不漂移） ===== */
 function snapBaseline(pid,reason){
   state.baselines=state.baselines||[];
-  var ms=(state.milestones||[]).filter(function(m){return m.productId===pid&&m.date}).sort(function(a,b){return a.date<b.date?-1:1});
+  var ms=(state.milestones||[]).filter(function(m){return m.productId===pid&&m.date&&!m.kind}).sort(function(a,b){return a.date<b.date?-1:1}); /* C22：分组不入基线 */
   if(!ms.length)return false;
   var sig=ms.map(function(m){return m.name+':'+m.date}).join('|');
   var last=(state.baselines||[]).filter(function(b){return b.productId===pid}).pop();
@@ -2193,17 +2265,53 @@ function saveBaseline(pid){
   RENDER();
 }
 function msState(m){
+  if(m.status==='已完成')return{cls:'ok',label:'已完成',c:'#00B42A',done:true}; /* C26：终态优先于未排期（C15 终态守卫口径） */
+  if(!m.date)return{cls:'gray',label:'未排期',c:'#86909C',done:false}; /* C26：无日期里程碑不再显示「剩 NaN 天」 */
   var d=diffDays(m.date);
-  if(m.status==='已完成')return{cls:'ok',label:'已完成',c:'#00B42A',done:true};
   if(d<0)return{cls:'warn',label:d<=-7?'严重逾期 '+(-d)+' 天':'已逾期 '+(-d)+' 天',c:d<=-7?'#C41D1D':'#F53F3F',done:false};
   if(m.status==='进行中')return{cls:'blue',label:'进行中 · 剩 '+d+' 天',c:'#165DFF',done:false};
   return{cls:'gray',label:d<=3?'临期 · 剩 '+d+' 天':'未开始 · 剩 '+d+' 天',c:d<=3?'#FF7D00':'#86909C',done:false};
 }
+/* ===== C22 两级 WBS（对标进度猫/MS Project）：阶段分组 + 工期条 =====
+ * 实体扩展：kind:'group'=阶段分组（不参与进度/依赖/基线，仅收纳）；parentId=所属分组 id（仅一级）；endDate=工期条结束日期
+ * 旧数据无新字段自动按顶层里程碑处理（向后兼容零迁移）；WBS 编码为展示层计算不落库 */
+var wbsFold={};      /* 分组折叠状态（会话级 UI 状态，不落库） */
+var pgScroll=0;      /* C30：项目甘特横向滚动记忆（RENDER 重建 DOM 后恢复，防「改完跳回开头」） */
+var ganttExpand={};  /* 项目行展开状态（会话级 UI 状态，不落库） */
+function msIsGroup(m){return m!=null&&m.kind==='group'}
+function msChildren(pid,gid){return (state.milestones||[]).filter(function(m){return m.productId===pid&&m.parentId===gid&&m.kind!=='group'})} /* C22：分组不可为子项 */
+function msTopItems(pid){return (state.milestones||[]).filter(function(m){return m.productId===pid&&!m.parentId&&m.kind!=='group'})}
+function msGroups(pid){return (state.milestones||[]).filter(function(m){return m.productId===pid&&m.kind==='group'})}
+function msGroupSpan(g){ /* 汇总跨度：子项 min(date)~max(endDate||date)；无有效子项返回 null */
+  var ch=msChildren(g.productId,g.id),lo=null,hi=null,done=0;
+  ch.forEach(function(m){
+    if(msIsGroup(m)||!m.date)return;
+    var e=(m.endDate&&m.endDate>m.date)?m.endDate:m.date;
+    if(!lo||m.date<lo)lo=m.date;
+    if(!hi||e>hi)hi=e;
+    if(m.status==='已完成')done++;
+  });
+  return lo?{lo:lo,hi:hi,n:ch.filter(function(m){return !msIsGroup(m)}).length,done:done}:null;
+}
+function msWbsCodes(pid){ /* WBS 编码（展示层）：顶层 1,2,3…；分组子项 n.k */
+  var codes={},n=0;
+  (state.milestones||[]).filter(function(m){return m.productId===pid&&!m.parentId}).forEach(function(m){
+    n++;codes[m.id]=String(n);
+    if(msIsGroup(m)){var k=0;msChildren(pid,m.id).forEach(function(c){k++;codes[c.id]=n+'.'+k})}
+  });
+  return codes;
+}
+function wbsToggle(id){wbsFold[id]=!wbsFold[id];RENDER()}
+function wbsUnfold(gid){ /* C30：往折叠分组写入子项后自动展开，防「加了看不到」的联动盲区 */
+  if(gid&&wbsFold[gid]){delete wbsFold[gid];return true}
+  return false;
+}
+function ganttExpandToggle(pid){ganttExpand[pid]=!ganttExpand[pid];RENDER()}
 /* C11 死数据修复：项目进度随里程碑完成比例自动联动（有里程碑才覆盖，无里程碑保持手工值） */
 function recalcProgress(pid){
   var p=byId(state.products,pid);if(!p)return;
   if(p.status==='已完工'||p.status==='已归档')return; /* C13：终态为人工口径，全量重算不改写（防订单全收货→已完工后被里程碑比例拉回，状态与进度自相矛盾） */
-  var arr=(state.milestones||[]).filter(function(m){return m.productId===pid});
+  var arr=(state.milestones||[]).filter(function(m){return m.productId===pid&&m.kind!=='group'}); /* C22：阶段分组不参与进度 */
   if(!arr.length)return;
   var done=arr.filter(function(m){return m.status==='已完成'}).length;
   var v=Math.round(done/arr.length*100);
@@ -2211,7 +2319,7 @@ function recalcProgress(pid){
 }
 /* 里程碑汇总：总数/已完成数/下一未完成里程碑（实体版优先，回退字段版） */
 function msSummary(p){
-  var arr=(state.milestones||[]).filter(function(m){return m.productId===p.id});
+  var arr=(state.milestones||[]).filter(function(m){return m.productId===p.id&&m.kind!=='group'}); /* C22：阶段分组不计数 */
   var total=arr.length,done=arr.filter(function(m){return m.status==='已完成'}).length;
   var next=null;
   if(arr.length){
@@ -2223,36 +2331,65 @@ function msSummary(p){
   return {total:total,done:done,next:next};
 }
 /* 新增里程碑：可选指定产品 */
-function openMilestone(pid){
-  var popts=state.products.map(function(p){return '<option value="'+p.id+'"'+(p.id===pid?' selected':'')+'>'+esc(p.name)+'</option>'}).join('');
-  openModal('新增里程碑',
-  '<div class="f-item"><label>关联项目</label><select id="f-msp">'+popts+'</select></div>'+
-  '<div class="f-row"><div class="f-item"><label>里程碑名称</label><input id="f-msname" placeholder="如：手板确认 / 模具完成 / 首批量产"></div><div class="f-item"><label>日期</label><input id="f-msdate" type="date" value="'+addDays(todayStr(),14)+'"></div></div>'+
+function msGroupOpts(pid,sel){ /* C22：归属阶段下拉（随所选项目联动，仅列该项目分组） */
+  return '<option value="">— 顶层 —</option>'+msGroups(pid).map(function(g){return '<option value="'+g.id+'"'+(g.id===sel?' selected':'')+'>'+esc(g.name)+'</option>'}).join('');
+}
+function msSyncGroupOpts(){ /* 切换关联项目时同步归属阶段选项（保留已选值） */
+  var gp=document.getElementById('f-msgroup');if(!gp)return;
+  gp.innerHTML=msGroupOpts(fv('f-msp'),gp.value);
+}
+function openMilestone(pid,presetT){
+  var pt=(presetT==='ms'||presetT==='group')?presetT:'task'; /* C32：甘特三类直达入口预设类型（非法/缺省回落 task） */
+  var popts=state.products.map(function(p){return '<option value="'+p.id+'"'+(p.id===pid?' selected':'')+'>'+esc(p.name)+'</option>'}).join(''); /* C32：默认选中当前项目（headless 端到端实证：原实现默认第一项，从详情页新增易存错项目） */
+  openMilestone._pt=pt; /* 供断言/调试观测当前预设 */
+  openModal('新增任务 / 里程碑 / 阶段分组',
+  '<div class="f-row"><div class="f-item"><label>关联项目</label><select id="f-msp" onchange="msSyncGroupOpts()">'+popts+'</select></div><div class="f-item"><label>类型</label><select id="f-mstype"><option value="task"'+(pt==='task'?' selected':'')+'>任务（工期条）</option><option value="ms"'+(pt==='ms'?' selected':'')+'>里程碑（节点）</option><option value="group"'+(pt==='group'?' selected':'')+'>阶段分组（不参与进度）</option></select></div></div>'+
+  '<div class="f-row"><div class="f-item"><label>归属阶段</label><select id="f-msgroup">'+msGroupOpts(pid,'')+'</select></div><div class="f-item"><label>名称</label><input id="f-msname" placeholder="如：手板确认 / 模具完成 / 首批量产"></div></div>'+
+  '<div class="f-row"><div class="f-item"><label>开始日期（分组可空）</label><input id="f-msdate" type="date" value="'+addDays(todayStr(),14)+'"></div><div class="f-item"><label>结束日期（任务必填）</label><input id="f-msend" type="date"></div></div>'+
   '<div class="f-row"><div class="f-item"><label>状态</label><select id="f-msstatus"><option>未开始</option><option>进行中</option><option>已完成</option></select></div><div class="f-item"><label>颜色</label><select id="f-mscolor"><option value="#722ED1">紫 · 打样</option><option value="#165DFF">蓝 · 样品</option><option value="#00B42A">绿 · 下单</option><option value="#FF7D00">橙 · 交付</option><option value="#F53F3F">红 · 整改</option></select></div></div>'+
   '<div class="f-item"><label>说明</label><input id="f-msdesc" placeholder="可选，里程碑说明/验收标准"></div>',
   function(){
-    if(!fv('f-msname')){toast('请填写里程碑名称');return}
-    if(!fv('f-msdate')){toast('请选择日期');return}
+    if(!fv('f-msname')){toast('请填写名称');return}
+    var tp=fv('f-mstype'),isG=tp==='group',isT=tp==='task'; /* C27：三类型 task/ms/group */
+    if(fv('f-msend')&&fv('f-msdate')&&fv('f-msend')<=fv('f-msdate')){toast('结束日期需晚于开始日期');return}
+    if(!isG&&!fv('f-msdate')){toast((isT?'任务':'里程碑')+'需要日期（阶段分组才可留空）');return} /* C26：堵「日期清空但结束日期还在」的 NaN 渲染洞 */
+    if(isT&&!fv('f-msend')){toast('任务需要结束日期（工期条长度）');return} /* C27：任务=工期条形态 */
+    var gid=fv('f-msgroup')||'',_gpName='';
+    if(gid){var gm=byId(state.milestones,gid);if(!gm||gm.kind!=='group'||gm.productId!==fv('f-msp')){toast('归属阶段无效');return}_gpName=gm.name}
     state.milestones=state.milestones||[];
-    state.milestones.push({id:nextId(state.milestones,'ms'),productId:fv('f-msp'),name:fv('f-msname'),date:fv('f-msdate'),status:fv('f-msstatus'),desc:fv('f-msdesc')||'',color:fv('f-mscolor')});
-    recalcProgress(fv('f-msp')); /* C11：新增里程碑联动项目进度 */
-    logAudit('新增里程碑：'+fv('f-msname')+'（'+pname(fv('f-msp'))+' · '+fv('f-msdate')+'）');
-    persist();closeModal();toast('已新增里程碑');RENDER();
+    state.milestones.push({id:nextId(state.milestones,'ms'),productId:fv('f-msp'),name:fv('f-msname'),date:isG?(fv('f-msdate')||''):fv('f-msdate'),status:isG?'未开始':fv('f-msstatus'),desc:fv('f-msdesc')||'',color:fv('f-mscolor'),kind:isG?'group':(isT?'task':''),parentId:isG?'':gid,endDate:(isG||!fv('f-msend'))?'':fv('f-msend')}); /* C22：分组仅一级，强制顶层；C27：任务 kind='task' 与里程碑同权 */
+    wbsUnfold(gid); /* C30：新增到折叠分组时自动展开，防「加了看不到」 */
+    recalcProgress(fv('f-msp')); /* C11：新增里程碑联动项目进度（C22：分组不计入） */
+    logAudit((isG?'新增阶段分组：':(isT?'新增任务：':'新增里程碑：'))+fv('f-msname')+'（'+pname(fv('f-msp'))+' · '+(fv('f-msdate')||'无日期')+(gid?' · 归属 '+_gpName:'')+'）');
+    persist();closeModal();toast(isG?'已新增阶段分组':(isT?'已新增任务':'已新增里程碑'));RENDER();
   });
 }
 function editMilestone(id){
   var m=byId(state.milestones,id);if(!m)return;
-  openModal('编辑里程碑：'+m.name,
-  '<div class="f-row"><div class="f-item"><label>名称</label><input id="f-msname" value="'+esc(m.name)+'"></div><div class="f-item"><label>日期</label><input id="f-msdate" type="date" value="'+(m.date||'')+'"></div></div>'+
-  '<div class="f-row"><div class="f-item"><label>状态</label><select id="f-msstatus"><option'+(m.status==='未开始'?' selected':'')+'>未开始</option><option'+(m.status==='进行中'?' selected':'')+'>进行中</option><option'+(m.status==='已完成'?' selected':'')+'>已完成</option></select></div><div class="f-item"><label>颜色</label><select id="f-mscolor"><option value="#722ED1"'+((m.color||'')==='#722ED1'?' selected':'')+'>紫 · 打样</option><option value="#165DFF"'+((m.color||'')==='#165DFF'?' selected':'')+'>蓝 · 样品</option><option value="#00B42A"'+((m.color||'')==='#00B42A'?' selected':'')+'>绿 · 下单</option><option value="#FF7D00"'+((m.color||'')==='#FF7D00'?' selected':'')+'>橙 · 交付</option><option value="#F53F3F"'+((m.color||'')==='#F53F3F'?' selected':'')+'>红 · 整改</option></select></div></div>'+
-  '<div class="f-item"><label>说明</label><input id="f-msdesc" value="'+esc(m.desc||'')+'"></div>',
+  var isG=msIsGroup(m);
+  var kidCnt=msChildren(m.productId,id).length;
+  openModal('编辑：'+m.name+(isG?'（阶段分组）':''),
+  '<div class="f-row"><div class="f-item"><label>名称</label><input id="f-msname" value="'+esc(m.name)+'"></div><div class="f-item"><label>类型</label><select id="f-mstype"><option value="task"'+(m.kind==='task'?' selected':'')+'>任务（工期条）</option><option value="ms"'+(!isG&&m.kind!=='task'?' selected':'')+'>里程碑（节点）</option><option value="group"'+(isG?' selected':'')+(kidCnt?' disabled':'')+'>阶段分组（不参与进度）</option></select></div></div>'+
+  '<div class="f-row"><div class="f-item"><label>归属阶段</label><select id="f-msgroup"><option value=""'+(m.parentId?'':' selected')+'>— 顶层 —</option>'+msGroups(m.productId).filter(function(g){return g.id!==id}).map(function(g){return '<option value="'+g.id+'"'+(g.id===m.parentId?' selected':'')+'>'+esc(g.name)+'</option>'}).join('')+'</select></div><div class="f-item"><label>开始日期（分组可空）</label><input id="f-msdate" type="date" value="'+(m.date||'')+'"></div></div>'+
+  '<div class="f-row"><div class="f-item"><label>结束日期（任务必填）</label><input id="f-msend" type="date" value="'+(m.endDate||'')+'"></div><div class="f-item"><label>状态</label><select id="f-msstatus"><option'+(m.status==='未开始'?' selected':'')+'>未开始</option><option'+(m.status==='进行中'?' selected':'')+'>进行中</option><option'+(m.status==='已完成'?' selected':'')+'>已完成</option></select></div></div>'+
+  '<div class="f-row"><div class="f-item"><label>颜色</label><select id="f-mscolor"><option value="#722ED1"'+((m.color||'')==='#722ED1'?' selected':'')+'>紫 · 打样</option><option value="#165DFF"'+((m.color||'')==='#165DFF'?' selected':'')+'>蓝 · 样品</option><option value="#00B42A"'+((m.color||'')==='#00B42A'?' selected':'')+'>绿 · 下单</option><option value="#FF7D00"'+((m.color||'')==='#FF7D00'?' selected':'')+'>橙 · 交付</option><option value="#F53F3F"'+((m.color||'')==='#F53F3F'?' selected':'')+'>红 · 整改</option></select></div><div class="f-item"><label>说明</label><input id="f-msdesc" value="'+esc(m.desc||'')+'"></div></div>',
   function(){
-    if(!fv('f-msname')){toast('请填写里程碑名称');return}
-    if(!fv('f-msdate')){toast('请选择日期');return}
+    if(!fv('f-msname')){toast('请填写名称');return}
+    var tp2=fv('f-mstype'),willG=tp2==='group',willT=tp2==='task'; /* C27：三类型 */
+    if(fv('f-msend')&&fv('f-msdate')&&fv('f-msend')<=fv('f-msdate')){toast('结束日期需晚于开始日期');return}
+    if(willG&&kidCnt){toast('该分组下仍有 '+kidCnt+' 个子项，不能转为任务/里程碑');return}
+    if(!willG&&!fv('f-msdate')){toast((willT?'任务':'里程碑')+'需要日期（阶段分组才可留空）');return} /* C26 同型站点② */
+    if(willT&&!fv('f-msend')){toast('任务需要结束日期（工期条长度）');return} /* C27：同型站点② */
+    var gid=fv('f-msgroup')||'';
+    if(gid===id)gid='';
+    if(gid&&!willG){var gm=byId(state.milestones,gid);if(!gm||gm.kind!=='group'||gm.productId!==m.productId){toast('归属阶段无效');return}}
+    var _kindChgG=willG&&!isG; /* C33：任务/里程碑 → 阶段分组时清理关联依赖（addDep 只拦新增，转换路径必须显式清） */
     var old=m.status;
-    m.name=fv('f-msname');m.date=fv('f-msdate');m.status=fv('f-msstatus');m.desc=fv('f-msdesc')||'';m.color=fv('f-mscolor');
+    m.name=fv('f-msname');m.kind=willG?'group':(willT?'task':'');m.parentId=willG?'':gid;m.date=willG?(fv('f-msdate')||''):fv('f-msdate');m.endDate=(willG||!fv('f-msend'))?'':fv('f-msend');m.status=willG?'未开始':fv('f-msstatus');m.desc=fv('f-msdesc')||'';m.color=fv('f-mscolor');
+    if(_kindChgG&&Array.isArray(state.deps)){var _dn=state.deps.length;state.deps=state.deps.filter(function(d){return d.from!==id&&d.to!==id});if(_dn!==state.deps.length)logAudit('依赖清理：'+m.name+' 转为阶段分组，移除 '+(_dn-state.deps.length)+' 条关联依赖')}
+    if(!willG)wbsUnfold(gid); /* C30：改期/改归属后若落入折叠分组自动展开 */
     recalcProgress(m.productId); /* C11：里程碑变更联动项目进度 */
-    logAudit('编辑里程碑：'+m.name+'（'+pname(m.productId)+' · '+m.date+' · '+old+' → '+m.status+'）');
+    logAudit('编辑里程碑：'+m.name+'（'+pname(m.productId)+' · '+(m.date||'无日期')+(m.endDate?' ~ '+m.endDate:'')+' · '+old+' → '+m.status+'）');
     persist();closeModal(); /* C19：交付里程碑完成 → 项目汇总即时显示「✓ 已交付」不再计逾期；结转仍为人工口径，仅提示 */
     var _msToast='已保存';
     if(m.name==='交付'&&m.status==='已完成'){var _dp=byId(state.products,m.productId);if(_dp&&_dp.status!=='已完工'&&_dp.status!=='已归档')_msToast='已保存 · 项目将显示「✓ 已交付」不再计逾期（如需结转请在编辑项目中改为已完工）'}
@@ -2261,30 +2398,37 @@ function editMilestone(id){
 }
 function delMilestone(id){
   var m=byId(state.milestones,id);if(!m)return;
-  if(!confirm('确定删除里程碑「'+m.name+'」？'))return;
+  var _kids=msIsGroup(m)?msChildren(m.productId,id).length:0; /* C22 */
+  if(!confirm(_kids?('确定删除阶段分组「'+m.name+'」？其下 '+_kids+' 个子项将上移到顶层。'):'确定删除里程碑「'+m.name+'」？'))return;
+  if(_kids)(state.milestones||[]).forEach(function(x){if(x.parentId===id)x.parentId=''}); /* C22：删分组不级联删子项，上移顶层防数据丢失 */
   state.milestones=state.milestones.filter(function(x){return x.id!==id});
   if(Array.isArray(state.deps))state.deps=state.deps.filter(function(d){return d.from!==id&&d.to!==id}); /* v1.1：级联清理关联依赖 */
   recalcProgress(m.productId); /* C11：删除里程碑联动项目进度 */
-  logAudit('删除里程碑：'+m.name+'（'+pname(m.productId)+'）');
-  persist();toast('已删除里程碑');RENDER();
+  logAudit('删除'+(_kids?'阶段分组（子项已上移顶层）':'里程碑')+'：'+m.name+'（'+pname(m.productId)+'）');
+  persist();toast(_kids?('已删除阶段分组，'+_kids+' 个子项上移顶层'):'已删除里程碑');RENDER();
 }
 /* 甘特图节点下钻：点击项目行 / 里程碑菱形查看详情（节点、项目、进度） */
 function ganttDrill(pid){
   var p=byId(state.products,pid);if(!p)return;
-  var mls=(state.milestones||[]).filter(function(m){return m.productId===pid});
-  var mlsHtml=mls.length?mls.map(function(m){
-    var s=msState(m);
-    return '<tr><td><span style="display:inline-block;width:8px;height:8px;background:'+m.color+';margin-right:6px;transform:rotate(45deg)"></span>'+esc(m.name)+'</td><td>'+m.date+'</td><td><span class="tag '+s.cls+'" style="color:'+s.c+'">'+s.label+'</span></td><td><button class="btn ghost sm" onclick="closeModal();editMilestone(\''+m.id+'\')">编辑</button> <button class="btn ghost sm" onclick="closeModal();delMilestone(\''+m.id+'\')">删</button></td></tr>';
-  }).join(''):'<tr><td colspan="4" class="empty">暂无里程碑，可点击「+ 里程碑」新增</td></tr>';
+  var mls=(state.milestones||[]).filter(function(m){return m.productId===pid&&m.kind!=='group'}); /* C22：分组不计入里程碑数 */
+  var _codesG=msWbsCodes(pid);
+  var mlsHtml=mls.length?(function(){var out=[]; /* C22：按 WBS 顺序展示，分组行带「阶段」标签与汇总跨度 */
+    (state.milestones||[]).filter(function(m){return m.productId===pid&&!m.parentId}).forEach(function(m){
+      var _row=function(m){var s=msIsGroup(m)?{cls:'gray',label:'阶段分组',c:'#86909C'}:msState(m);
+        return '<tr><td>'+(msIsGroup(m)?'<span class="tag gray">阶段</span> ':'<span style="display:inline-block;width:8px;height:8px;background:'+m.color+';margin-right:6px;transform:rotate(45deg)"></span>')+'<span style="font-family:monospace;color:var(--ink3);margin-right:4px">'+(_codesG[m.id]||'')+'</span>'+esc(m.name)+'</td><td>'+(m.date?(m.date+(m.endDate?' ~ '+m.endDate:'')):'—')+'</td><td><span class="tag '+s.cls+'" style="color:'+s.c+'">'+s.label+'</span></td><td><button class="btn ghost sm" onclick="closeModal();editMilestone(\''+m.id+'\')">编辑</button> <button class="btn ghost sm" onclick="closeModal();delMilestone(\''+m.id+'\')">删</button></td></tr>'};
+      out.push(_row(m));
+      if(msIsGroup(m))msChildren(pid,m.id).forEach(function(m){out.push(_row(m))});
+    });
+    return out.join('')})():'<tr><td colspan="4" class="empty">暂无里程碑，可点击「+ 里程碑」新增</td></tr>';
   var ods=state.orders.filter(function(o){return o.productId===pid});
-  var odsHtml=ods.length?ods.map(function(o){var _s=overdueState(diffDays(orderDue(o)));return '<tr><td>'+o.code+'</td><td class="tnum">'+o.qty+'</td><td>'+orderDue(o)+'</td><td><span class="tag blue">'+o.status+'</span></td><td style="color:'+_s.color+'">'+_s.label+'</td></tr>'}).join(''):'<tr><td colspan="5" class="empty">暂无订单</td></tr>';
+  var odsHtml=ods.length?ods.map(function(o){var _dn=o.step>=4||o.status==='已完成';var _s=overdueState(diffDays(orderDue(o)));return '<tr><td>'+o.code+'</td><td class="tnum">'+o.qty+'</td><td>'+orderDue(o)+'</td><td><span class="tag blue">'+o.status+'</span></td><td style="color:'+(_dn?'#00B42A':_s.color)+'">'+(_dn?'✓ 已完成':_s.label)+'</td></tr>'}).join(''):'<tr><td colspan="5" class="empty">暂无订单</td></tr>'; /* C24：已收货订单终态守卫（对齐订单列表 L3819 口径，已收货不计逾期） */
   openModal('项目详情：'+p.name,
   '<div style="font-size:13px;line-height:1.9;margin-bottom:8px">'+
     '<span class="tag" style="background:'+(function(){var _c={'生产中':'#165DFF','打样中':'#722ED1','立项中':'#86909C','已完工':'#00B42A','已归档':'#C9CDD4'}[p.status]||'#86909C';return _c+'15'})()+';color:'+({'生产中':'#165DFF','打样中':'#722ED1','立项中':'#86909C','已完工':'#00B42A','已归档':'#C9CDD4'}[p.status]||'#86909C')+'">'+p.status+'</span>'+
     ' <strong>'+esc(p.cat)+'</strong> · '+esc(p.platform||'—')+' · 负责人 '+(p.owner||'—')+'<br>'+
     '目标交期 '+((p.targetDate||'—'))+' · 立项日 '+(p.ideaDate||'—')+' · 进度 '+((p.progress||0))+'%'+
     '<div class="bar" style="margin-top:6px"><i style="width:'+(p.progress||0)+'%;background:var(--primary)"></i></div></div>'+
-  '<div style="font-size:13px;font-weight:700;margin:12px 0 6px">里程碑（'+mls.length+'）<button class="btn sm" style="margin-left:8px" onclick="closeModal();openMilestone(\''+pid+'\')">+ 里程碑</button></div>'+
+  '<div style="font-size:13px;font-weight:700;margin:12px 0 6px">里程碑（'+mls.length+'）<button class="btn sm" style="margin-left:8px" onclick="closeModal();openMilestone(\''+pid+'\',\'ms\')">+ 里程碑</button></div>'+
   '<div class="table-wrap" style="max-height:160px;overflow:auto"><table><thead><tr><th>名称</th><th>日期</th><th>状态</th><th>操作</th></tr></thead><tbody>'+mlsHtml+'</tbody></table></div>'+
   '<div style="font-size:13px;font-weight:700;margin:12px 0 6px">订单（'+ods.length+'）</div>'+
   '<div class="table-wrap" style="max-height:160px;overflow:auto"><table><thead><tr><th>订单号</th><th>数量</th><th>交期</th><th>状态</th><th>倒计时</th></tr></thead><tbody>'+odsHtml+'</tbody></table></div>'+
@@ -2307,6 +2451,203 @@ function msDrill(mid){
   function(){closeModal()},'关闭');
 }
 
+/* ===== C25：项目详情甘特图（对标参考图：左 WBS 任务树表格 + 右时间条形区，单项目范围） ===== */
+function projGanttHTML(pid){
+  var p=byId(state.products,pid);
+  var LEFT_W=250,DAY_W=PG_DAY_W,ROW_H=34,HEAD_H=48; /* 左列宽/日宽(C31 与拖放内核同源 PG_DAY_W)/行高/表头高（月24+日24） */
+  var codes=msWbsCodes(pid),rows=[];
+  (state.milestones||[]).filter(function(m){return m.productId===pid&&!m.parentId}).forEach(function(m){
+    rows.push({m:m,isG:msIsGroup(m),lvl:0,code:codes[m.id]||''});
+    if(msIsGroup(m))msChildren(pid,m.id).forEach(function(c){rows.push({m:c,isG:false,lvl:1,code:codes[c.id]||''})});
+  });
+  if(!rows.length)return '<div class="empty" style="padding:20px 0">暂无里程碑 / 阶段分组——直接在这里排期：<div style="display:flex;gap:8px;justify-content:center;margin-top:10px"><button class="btn sm" onclick="openMilestone(\''+pid+'\',\'task\')">+ 任务</button><button class="btn sm" onclick="openMilestone(\''+pid+'\',\'ms\')">+ 里程碑</button><button class="btn ghost sm" onclick="openMilestone(\''+pid+'\',\'group\')">+ 阶段分组</button></div><div style="font-size:11px;color:var(--ink3);margin-top:8px">新增后立即上甘特图；工期条 / 菱形支持拖拽改期</div></div>'; /* C32：空态直达入口（不再引导去概览 tab） */
+  /* 时间范围自适应：里程碑/分组跨度 ∪ 项目 ideaDate/targetDate，前留 3 天后留 7 天 */
+  var lo=null,hi=null;
+  rows.forEach(function(r){
+    if(r.isG){var sp=msGroupSpan(r.m);if(sp){if(!lo||sp.lo<lo)lo=sp.lo;if(!hi||sp.hi>hi)hi=sp.hi}return}
+    if(!r.m.date)return;
+    if(!lo||r.m.date<lo)lo=r.m.date;
+    var e=(r.m.endDate&&r.m.endDate>r.m.date)?r.m.endDate:r.m.date;
+    if(!hi||e>hi)hi=e;
+  });
+  [p.ideaDate,p.targetDate].forEach(function(d){if(d){if(!lo||d<lo)lo=d;if(!hi||d>hi)hi=d}});
+  var rawLo=lo,rawHi=hi; /* C27：内容跨度（不含 padding），供项目总条使用 */
+  if(!rawLo||!rawHi){rawLo=null;rawHi=null} /* C27：单端真值+单端兜底的混合跨度不标总时长 */
+  if(!lo||!hi){lo=todayStr();hi=addDays(lo,30)}
+  lo=addDays(lo,-3);hi=addDays(hi,7);
+  var totalDays=Math.max(14,Math.round((parseDate(hi)-parseDate(lo))/86400000)+1);
+  var timelineW=totalDays*DAY_W,startT=parseDate(lo);
+  function xOf(ds){return Math.round((parseDate(ds)-startT)/86400000)*DAY_W}
+  var todayX=Math.max(0,Math.min(xOf(todayStr()),timelineW-2)); /* C26：今日线钳制在时间轴内 */
+  /* 周末条纹：repeating-linear-gradient 周期必须=最后一个色标位（7*DAY_W），任意起步日都对齐周六+周日。
+     C26 修复：旧写法末位色标=(satOff+2)*DAY_W，仅周一起步恰好 7 天周期；周六起步会全轴涂色、其余起步逐周漂移 */
+  var g0=startT.getDay(),satOff=(6-g0+7)%7,wk;
+  if(g0===0){ /* 周日起步：周内 [0,D) 周日 + [6D,7D) 周六，两段条纹 */
+    wk='repeating-linear-gradient(90deg,var(--soft) 0,var(--soft) '+DAY_W+'px,transparent '+DAY_W+'px,transparent '+(6*DAY_W)+'px,var(--soft) '+(6*DAY_W)+'px,var(--soft) '+(7*DAY_W)+'px)';
+  }else{
+    wk='repeating-linear-gradient(90deg,transparent 0,transparent '+(satOff*DAY_W)+'px,var(--soft) '+(satOff*DAY_W)+'px,var(--soft) '+((satOff+2)*DAY_W)+'px,transparent '+((satOff+2)*DAY_W)+'px,transparent '+(7*DAY_W)+'px)';
+    if(satOff+2>totalDays)wk='none';
+  }
+  /* 月表头分段 */
+  var months='',curM='',segW=0,segName='';
+  for(var d2=0;d2<totalDays;d2++){
+    var dt2=new Date(startT.getTime()+d2*86400000),mk2=dt2.getFullYear()+'-'+dt2.getMonth();
+    if(mk2!==curM){if(segW>0)months+='<div style="flex:none;width:'+segW*DAY_W+'px;text-align:center;font-size:11px;font-weight:600;color:var(--ink2);border-right:1px solid var(--line);overflow:hidden;white-space:nowrap">'+esc(segName)+'</div>';curM=mk2;segName=(dt2.getMonth()+1)+'月 '+dt2.getFullYear();segW=0}
+    segW++;
+  }
+  months+='<div style="flex:none;width:'+segW*DAY_W+'px;text-align:center;font-size:11px;font-weight:600;color:var(--ink2)">'+esc(segName)+'</div>';
+  /* 日表头 + 周末着色 */
+  var days='';
+  for(var d3=0;d3<totalDays;d3++){
+    var dt3=new Date(startT.getTime()+d3*86400000),we=(dt3.getDay()===0||dt3.getDay()===6);
+    days+='<div class="tnum" style="flex:none;width:'+DAY_W+'px;text-align:center;font-size:10px;color:'+(we?'var(--gray-light)':'var(--ink3)')+';background:'+(we?'var(--soft)':'transparent')+'">'+dt3.getDate()+'</div>';
+  }
+  /* 行渲染 */
+  var body='';
+  rows.forEach(function(r){
+    var m=r.m,left,pad=8+r.lvl*16;
+    if(r.isG){
+      var sp=msGroupSpan(m);
+      left='<span style="font-family:monospace;font-size:10px;color:var(--ink3);flex:none">'+r.code+'</span><strong style="font-size:12px">'+esc(m.name)+'</strong><span class="tag gray" style="font-size:10px;flex:none">阶段</span>';
+      var bar='';
+      if(sp)bar='<div title="阶段汇总 '+sp.done+'/'+sp.n+' 完成（'+sp.lo+' ~ '+sp.hi+'）" style="position:absolute;left:'+xOf(sp.lo)+'px;top:8px;height:18px;min-width:24px;border-radius:4px;background:var(--ink);color:var(--on-accent);font-size:10px;display:flex;align-items:center;padding:0 8px;white-space:nowrap;overflow:hidden;box-shadow:var(--shadow)">'+esc(m.name)+' · '+sp.done+'/'+sp.n+'</div>';
+      body+='<div style="display:flex;height:'+ROW_H+'px;border-bottom:1px solid var(--line);background:var(--head)"><div style="position:sticky;left:0;z-index:2;width:'+LEFT_W+'px;flex:none;background:var(--head);display:flex;align-items:center;gap:6px;padding:0 8px;border-right:1px solid var(--line);padding-left:'+pad+'px;overflow:hidden;white-space:nowrap">'+left+'</div><div style="position:relative;flex:none;width:'+timelineW+'px"><div style="position:absolute;inset:0;background:'+wk+'"></div>'+bar+'</div></div>';
+    }else{
+      var s=msState(m);
+      left='<span style="font-family:monospace;font-size:10px;color:var(--ink3);flex:none">'+r.code+'</span><span style="font-size:12px;cursor:pointer" onclick="msDrill(\''+m.id+'\')">'+esc(m.name)+'</span>'+(m.kind==='task'?'<span class="tag gray" style="font-size:10px;flex:none">任务</span>':'')+'<span class="tag '+s.cls+'" style="font-size:10px;flex:none;color:'+s.c+'">'+s.label+'</span>';
+      var cell='';
+      if(m.date&&m.endDate&&m.endDate>m.date){
+        var bx=xOf(m.date),bw=Math.max(DAY_W,xOf(m.endDate)-xOf(m.date)+DAY_W);
+        /* C31：工期条可拖拽——整体平移（grab）+ 左右双缘缩放（ew-resize 手柄）；点击下钻改由 pgDragUp 阈值路径处理，防拖拽误触 msDrill */
+        cell='<div onmousedown="pgDrag(event,\''+m.id+'\',\'move\')" title="拖拽平移 · '+esc(m.name)+' '+m.date+' ~ '+m.endDate+' · '+s.label+'" style="position:absolute;left:'+bx+'px;top:10px;height:14px;width:'+bw+'px;border-radius:4px;background:'+m.color+';opacity:.9;cursor:grab"><div onmousedown="pgDrag(event,\''+m.id+'\',\'left\')" title="拖拽调整开始日期" style="position:absolute;left:0;top:0;width:7px;height:100%;cursor:ew-resize;border-radius:4px 0 0 4px;background:rgba(255,255,255,.4)"></div><div onmousedown="pgDrag(event,\''+m.id+'\',\'right\')" title="拖拽调整结束日期" style="position:absolute;right:0;top:0;width:7px;height:100%;cursor:ew-resize;border-radius:0 4px 4px 0;background:rgba(255,255,255,.4)"></div></div><span onclick="msDrill(\''+m.id+'\')" style="position:absolute;left:'+Math.min(bx+bw+6,timelineW-90)+'px;top:9px;font-size:11px;color:var(--ink2);cursor:pointer;white-space:nowrap">'+esc(m.name)+'</span>';
+      }else if(m.date){
+        var dx=xOf(m.date)+Math.floor(DAY_W/2)-5;
+        /* C31：里程碑菱形可拖拽改期（move）；点击下钻走 pgDragUp 阈值路径 */
+        cell='<div onmousedown="pgDrag(event,\''+m.id+'\',\'move\')" title="拖拽改期 · '+esc(m.name)+' '+m.date+' · '+s.label+'" style="position:absolute;left:'+dx+'px;top:12px;width:10px;height:10px;background:'+m.color+';transform:rotate(45deg);cursor:grab"></div><span onclick="msDrill(\''+m.id+'\')" style="position:absolute;left:'+(dx+16)+'px;top:9px;font-size:11px;color:var(--ink2);cursor:pointer;white-space:nowrap">'+esc(m.name)+'</span>';
+      }
+      body+='<div style="display:flex;height:'+ROW_H+'px;border-bottom:1px solid var(--line)"><div style="position:sticky;left:0;z-index:2;width:'+LEFT_W+'px;flex:none;background:var(--panel);display:flex;align-items:center;gap:6px;padding:0 8px;border-right:1px solid var(--line);padding-left:'+pad+'px;overflow:hidden;white-space:nowrap">'+left+'</div><div style="position:relative;flex:none;width:'+timelineW+'px"><div style="position:absolute;inset:0;background:'+wk+'"></div>'+cell+'</div></div>';
+    }
+  });
+  /* C27：项目总条——内容跨度（rawLo~rawHi，不含 padding），标注总时长 N 天（含首尾） */
+  var sumHtml='';
+  if(rawLo&&rawHi){
+    var totDays=Math.round((parseDate(rawHi)-parseDate(rawLo))/86400000)+1;
+    var sx=xOf(rawLo),sw=Math.max(60,xOf(rawHi)-xOf(rawLo)+DAY_W);
+    sumHtml='<div style="display:flex;height:'+ROW_H+'px;border-bottom:1px solid var(--line);background:var(--soft)"><div style="position:sticky;left:0;z-index:2;width:'+LEFT_W+'px;flex:none;background:var(--soft);display:flex;align-items:center;gap:6px;padding:0 8px;border-right:1px solid var(--line);overflow:hidden;white-space:nowrap"><span style="font-size:12px;font-weight:700">'+esc(p.name)+'</span></div><div style="position:relative;flex:none;width:'+timelineW+'px"><div style="position:absolute;inset:0;background:'+wk+'"></div><div title="项目总时长 '+totDays+' 天（'+rawLo+' ~ '+rawHi+'）" style="position:absolute;left:'+sx+'px;top:8px;height:18px;width:'+sw+'px;border-radius:4px;background:var(--primary);color:var(--on-accent);font-size:10px;display:flex;align-items:center;padding:0 8px;white-space:nowrap;overflow:hidden;box-shadow:var(--shadow)">总时长 '+totDays+' 天</div></div></div>';
+    body=sumHtml+body;
+  }
+  /* 图例 + 主体（横向纵向共享一个滚动容器：左列 sticky 吸附、表头 sticky 吸附、今日线绝对定位） */
+  return '<div style="display:flex;gap:14px;flex-wrap:wrap;font-size:11px;color:var(--ink3);margin-bottom:8px">'+
+    '<span><i style="display:inline-block;width:16px;height:10px;border-radius:3px;background:var(--primary);margin-right:4px;vertical-align:middle"></i>项目总条（总时长）</span>'+
+    '<span><i style="display:inline-block;width:16px;height:10px;border-radius:3px;background:var(--ink);margin-right:4px;vertical-align:middle"></i>阶段汇总条</span>'+
+    '<span><i style="display:inline-block;width:16px;height:10px;border-radius:3px;background:var(--primary);margin-right:4px;vertical-align:middle"></i>工期条（颜色=里程碑色）</span>'+
+    '<span><i style="display:inline-block;width:8px;height:8px;background:var(--amber);transform:rotate(45deg);margin-right:4px;vertical-align:middle"></i>里程碑节点</span>'+
+    '<span><i style="display:inline-block;width:2px;height:10px;background:var(--warn);margin-right:4px;vertical-align:middle"></i>今天</span>'+
+    '<span style="color:var(--ink2)">✋ 工期条 / 里程碑可拖拽：整体平移、拖双缘调起止，松手即保存（汇总条=自动派生不可拖）</span></div>'+
+    '<div id="pg-scroll" onscroll="pgScroll=this.scrollLeft" style="border:1px solid var(--line);border-radius:8px;overflow:auto;max-height:62vh;background:var(--panel)">'+
+    '<div style="width:'+(LEFT_W+timelineW)+'px;min-width:100%;position:relative">'+
+      '<div style="display:flex;height:'+HEAD_H+'px;position:sticky;top:0;z-index:3">'+
+        '<div style="position:sticky;left:0;z-index:4;width:'+LEFT_W+'px;flex:none;background:var(--head);border-right:1px solid var(--line);border-bottom:1px solid var(--line);display:flex;align-items:center;padding:0 8px;font-size:11px;font-weight:700;color:var(--ink2)">WBS / 任务名称</div>'+
+        '<div style="flex:none;width:'+timelineW+'px"><div style="display:flex;height:24px;border-bottom:1px solid var(--line)">'+months+'</div><div style="display:flex;height:24px">'+days+'</div></div>'+
+      '</div>'+ body +
+      '<div style="position:absolute;left:'+(LEFT_W+todayX)+'px;top:'+HEAD_H+'px;bottom:0;width:2px;background:var(--warn);opacity:.55;z-index:1;pointer-events:none" title="今天"></div>'+
+    '</div></div>';
+}
+
+/* ===== C31：甘特自由拖放（v1.0.62） =====
+ * 范围：项目详情甘特的工期条（kind='task'）与里程碑菱形；阶段分组汇总条 / 项目总条为 recompute 派生数据，禁止拖拽。
+ * 交互：mousedown 起手 → 越过 4px 阈值进入拖拽（移动幽灵条 + 浮动日期提示）→ mouseup 提交；未越阈值按点击下钻（msDrill）。
+ * 数据红线：落盘唯一路径 pgDragCommit —— 日期回写 → logAudit → recalcProgress（C11 保存点）→ persist()（C13：自动 recomputeDerived）→ RENDER 实时刷新（时间轴范围自适应扩展）。
+ * 不变量：工期条 date < endDate（左缘不得压到右缘、右缘不得压到左缘，越界自动钳到相邻日）。 */
+var PG_DAY_W=30; /* 日宽像素：projGanttHTML 与拖放位移换算同源 */
+var pgDragState=null;
+function pgDrag(ev,id,mode){
+  var m=byId(state.milestones,id);
+  if(!m||!m.date||msIsGroup(m))return; /* 分组汇总条=派生数据，禁止拖拽改写 */
+  ev.stopPropagation();ev.preventDefault(); /* 双缘手柄阻断冒泡到整条；防文字选中/浏览器原生拖拽 */
+  var bar=(mode==='move')?ev.currentTarget:ev.currentTarget.parentElement; /* C33：双缘手柄拖拽的幽灵作用于父条（手柄自身 origLeft=0 会飞离条体——C31 视觉盲区，e2e 只验了数据未验中程视觉） */
+  pgDragState={id:id,mode:mode,x0:ev.clientX,el:bar,origLeft:parseFloat(bar.style.left)||0,origW:parseFloat(bar.style.width)||0,moved:false,days:0};
+  document.addEventListener('mousemove',pgDragMove);
+  document.addEventListener('mouseup',pgDragUp);
+  document.addEventListener('keydown',pgDragCancel); /* C34：Esc 中断取消（还原幽灵条、摘全部监听、不落数据） */
+}
+function pgDragCancel(ev){ /* C34：拖拽中 Esc=取消 */
+  if(!pgDragState||ev.key!=='Escape')return;
+  var st=pgDragState;
+  st.el.style.left=st.origLeft+'px';if(st.origW)st.el.style.width=st.origW+'px'; /* 还原幽灵条 */
+  document.removeEventListener('mousemove',pgDragMove);
+  document.removeEventListener('mouseup',pgDragUp);
+  document.removeEventListener('keydown',pgDragCancel);
+  pgDragState=null;
+  document.body.classList.remove('pg-dragging');
+  pgTipShow(0,0,'');
+  toast('已取消拖拽');
+}
+function pgDragMove(ev){
+  var st=pgDragState;if(!st)return;
+  if(!st.moved&&Math.abs(ev.clientX-st.x0)<4)return; /* 阈值内仍视为点击 */
+  if(!st.moved){st.moved=true;document.body.classList.add('pg-dragging')}
+  st.days=Math.round((ev.clientX-st.x0)/PG_DAY_W);
+  if(st.mode==='left'){ /* C33：左缘幽灵=父条左移+宽度收缩（钳最小一天宽，与 pgDragCommit 钳制同向） */
+    st.el.style.left=(st.origLeft+st.days*PG_DAY_W)+'px';
+    if(st.origW)st.el.style.width=Math.max(PG_DAY_W,st.origW-st.days*PG_DAY_W)+'px';
+  }else if(st.mode==='right'){
+    if(st.origW)st.el.style.width=Math.max(PG_DAY_W,st.origW+st.days*PG_DAY_W)+'px';
+  }else st.el.style.left=(st.origLeft+st.days*PG_DAY_W)+'px';
+  var m=byId(state.milestones,st.id),txt='';
+  if(m){
+    var _ld=st.days,_re='';
+    if(st.mode==='left'&&m.endDate){var _nd=addDays(m.date,st.days);if(_nd>=m.endDate){_nd=addDays(m.endDate,-1);_re='（钳制）'}txt='开始 → '+_nd+_re+'（保持 ~ '+m.endDate+'）'} /* C34：提示与 pgDragCommit 钳制同口径，防「提示 10-20 实落 10-19」误导 */
+    else if(st.mode==='right'&&m.endDate){var _ne=addDays(m.endDate,st.days);if(_ne<=m.date){_ne=addDays(m.date,1);_re='（钳制）'}txt='结束 → '+_ne+_re+'（保持 '+m.date+'）'}
+    else txt=m.date+(m.endDate?' ~ '+m.endDate:'')+' → '+addDays(m.date,st.days)+(m.endDate?' ~ '+addDays(m.endDate,st.days):'');
+  }
+  pgTipShow(ev.clientX,ev.clientY,txt);
+}
+function pgTipShow(x,y,txt){ /* 拖拽浮动提示：跟随鼠标展示落点日期 */
+  var t=document.getElementById('pg-drag-tip');
+  if(!txt){if(t)t.remove();return}
+  if(!t){t=document.createElement('div');t.id='pg-drag-tip';document.body.appendChild(t)}
+  t.textContent=txt;t.style.left=(x+12)+'px';t.style.top=(y-28)+'px';
+}
+function pgDragCommit(id,mode,days){ /* 拖拽数据落盘唯一路径（可测试内核，verify.js 直接调用） */
+  var m=byId(state.milestones,id);
+  if(!m||!days||msIsGroup(m))return false; /* 0 位移 / 分组=不改数据 */
+  var oldD=m.date,oldE=m.endDate||'';
+  if(mode==='move'){
+    m.date=addDays(m.date,days);
+    if(m.endDate)m.endDate=addDays(m.endDate,days); /* 整体平移保持工期不变量 */
+  }else if(mode==='left'){
+    var nd=addDays(m.date,days);
+    if(m.endDate&&nd>=m.endDate)nd=addDays(m.endDate,-1); /* 左缘钳制：不得越过右缘 */
+    if(nd===m.date)return false;
+    m.date=nd;
+  }else if(mode==='right'){
+    if(!m.endDate)return false; /* 里程碑节点无右缘 */
+    var ne=addDays(m.endDate,days);
+    if(ne<=m.date)ne=addDays(m.date,1); /* 右缘钳制：不得压到左缘 */
+    if(ne===m.endDate)return false;
+    m.endDate=ne;
+  }else return false;
+  logAudit('甘特拖拽：'+m.name+'（'+pname(m.productId)+'）'+oldD+(oldE?' ~ '+oldE:'')+' → '+m.date+(m.endDate?' ~ '+m.endDate:''));
+  recalcProgress(m.productId); /* C11 红线：里程碑变更保存点 */
+  persist(); /* C13 红线：业务变更必经 persist（自动 recomputeDerived） */
+  return true;
+}
+function pgDragUp(ev){
+  var st=pgDragState;
+  document.removeEventListener('mousemove',pgDragMove);
+  document.removeEventListener('mouseup',pgDragUp);
+  document.removeEventListener('keydown',pgDragCancel); /* C34：正常松手同步摘 Esc 监听 */
+  pgDragState=null;
+  document.body.classList.remove('pg-dragging');
+  pgTipShow(0,0,'');
+  if(!st)return;
+  if(!st.moved){msDrill(st.id);return} /* 未越阈值=点击下钻 */
+  var _dm=byId(state.milestones,st.id);
+  if(pgDragCommit(st.id,st.mode,st.days||0))toast('已更新：'+(_dm?_dm.name:'')); /* 0 位移拖回原位静默 */
+  RENDER(); /* 实时刷新：拖出边界时时间轴范围随数据自适应扩展 */
+}
+
 /* ===== 任务依赖与关键路径（v1.1 P0：A2 连线式编辑 + A1 关键路径高亮） =====
  * 模型 state.deps: {id, from, to, type}，from/to 为里程碑 id，type ∈ FS/SS/FF/SF
  * 连线式编辑：甘特图头部「✎ 依赖编辑」开关 → 两段式点击菱形建立依赖，点击连线查看/删除
@@ -2319,6 +2660,8 @@ function msName(id){var m=byId(state.milestones,id);return m?(pname(m.productId)
 function daysBetween(a,b){return Math.round((parseDate(b)-parseDate(a))/86400000)}
 function addDep(from,to,type,silent){
   state.deps=state.deps||[];
+  var _fm=byId(state.milestones,from),_tm=byId(state.milestones,to);
+  if((_fm&&_fm.kind==='group')||(_tm&&_tm.kind==='group')){if(!silent)toast('阶段分组不参与依赖连线，请选择具体里程碑');return false} /* C22 */
   if(state.deps.some(function(d){return d.from===from&&d.to===to}))return false; /* 同一对任务只允许一条依赖（UI/CSV/基线链统一双键去重） */
   state.deps.push({id:nextId(state.deps,'dp'),from:from,to:to,type:type});
   if(!silent)logAudit('新增依赖：'+msName(from)+' '+DEP_TYPES[type]+' '+msName(to));
@@ -2341,10 +2684,10 @@ function depReachable(fromId,toId,stack){
 function ensureDeps(){
   if(!Array.isArray(state.deps))state.deps=[];
   if(!Array.isArray(state._delBaseDeps))state._delBaseDeps=[];
-  state.deps=state.deps.filter(function(d){return d&&byId(state.milestones,d.from)&&byId(state.milestones,d.to)&&DEP_TYPES[d.type]});
+  state.deps=state.deps.filter(function(d){var fm=d&&byId(state.milestones,d.from),tm=d&&byId(state.milestones,d.to);return fm&&tm&&fm.kind!=='group'&&tm.kind!=='group'&&DEP_TYPES[d.type]}); /* C33：端点为阶段分组的依赖一并清除（任务转分组路径会残留，污染关键路径/连线渲染） */
   state._delBaseDeps=state._delBaseDeps.filter(function(p){return p&&byId(state.milestones,p.from)&&byId(state.milestones,p.to)});
   var byP={};
-  (state.milestones||[]).forEach(function(m){if(m.productId)(byP[m.productId]=byP[m.productId]||[]).push(m)});
+  (state.milestones||[]).forEach(function(m){if(m.productId&&!m.kind)(byP[m.productId]=byP[m.productId]||[]).push(m)}); /* C22：分组不入基线依赖链 */
   Object.keys(byP).forEach(function(pid){
     var arr=byP[pid].filter(isBaseMs).sort(function(a,b){return a.date<b.date?-1:a.date>b.date?1:0});
     for(var i=0;i<arr.length-1;i++){
@@ -2645,7 +2988,7 @@ function printGlobalHTML(){
 function printProjectHTML(pid){
   var p=byId(state.products,pid);
   if(!p){toast('请先从项目详情页打开报表');return ''}
-  var mls=(state.milestones||[]).filter(function(m){return m.productId===pid}).sort(function(a,b){return a.date<b.date?-1:a.date>b.date?1:0});
+  var mls=(state.milestones||[]).filter(function(m){return m.productId===pid&&m.kind!=='group'}).sort(function(a,b){return a.date<b.date?-1:a.date>b.date?1:0}); /* C22：分组不进时间轴（msState 对无日期分组会出 NaN 文案） */
   var orders=state.orders.filter(function(o){return o.productId===pid});
   var samples=state.samples.filter(function(x){return x.productId===pid});
   var issues=state.issues.filter(function(i){return i.productId===pid||orders.some(function(o){return o.id===i.orderId})});
@@ -2763,9 +3106,11 @@ function ganttHTML(){
     var _pDeliv=!_pDone&&projDelivered(p);
     var overdue=diffDays(projDueDate(p))<0&&!_pDone&&!_pDeliv;
     // 里程碑四态（参考图3图例，数据源=里程碑实体 state.milestones）：已完成绿 / 进行中蓝 / 未开始空心 / 已逾期红
-    var ems=(state.milestones||[]).filter(function(x){return x.productId===p.id});
+    var ems=(state.milestones||[]).filter(function(x){return x.productId===p.id&&x.kind!=='group'}); /* C22：分组不出菱形 */
+    var exp=!!ganttExpand[p.id]; /* C22：项目行展开=两级 WBS 任务树 */
+    var hasTree=(state.milestones||[]).some(function(x){return x.productId===p.id});
     var mHtml='';
-    ems.forEach(function(m){
+    if(!exp)ems.forEach(function(m){
       if(!m.date)return;
       var mx=Math.round((parseDate(m.date)-startT)/86400000);
       if(mx<0||mx>totalDays)return;
@@ -2816,7 +3161,7 @@ function ganttHTML(){
     rows+=
     '<div style="display:flex;height:'+ROW_H+'px;border-bottom:1px solid var(--line);align-items:center;cursor:pointer" onclick="ganttDrill(\''+p.id+'\')" title="点击查看 '+esc(p.name)+' 的项目进度/里程碑/订单详情">'+
       '<div style="width:200px;flex-shrink:0;padding:0 12px;overflow:hidden">'+
-        '<div style="font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+esc(p.name)+'</div>'+
+        '<div style="font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+(hasTree?'<span onclick="event.stopPropagation();ganttExpandToggle(\''+p.id+'\')" style="cursor:pointer;display:inline-block;width:14px;color:var(--ink2);font-size:10px" title="展开/收起 WBS 任务树">'+(exp?'▾':'▸')+'</span> ':'')+esc(p.name)+'</div>'+
         '<div style="font-size:10px;color:var(--ink3);margin-top:2px"><span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:'+barColor+';margin-right:4px"></span>'+p.status+'</div>'+
       '</div>'+
       '<div style="position:relative;flex:1;height:100%">'+
@@ -2830,6 +3175,54 @@ function ganttHTML(){
       '</div>'+
     '</div>';
     rowY+=ROW_H; /* v1.1：每项目行递增，保证 SVG 连线 y 与菱形实际行位对齐 */
+    if(exp){ /* C22 两级 WBS 树：阶段分组行（深框汇总条）+ 里程碑行（工期条/菱形），行位递增供依赖连线对齐 */
+      var _codes=msWbsCodes(p.id);
+      (state.milestones||[]).filter(function(m){return m.productId===p.id&&!m.parentId}).forEach(function(m){
+        var _isG=msIsGroup(m);
+        var _sp=_isG?msGroupSpan(m):null;
+        var _kids=_isG?msChildren(p.id,m.id):[];
+        var _fold=_isG&&wbsFold[m.id];
+        rows+='<div style="display:flex;height:28px;border-bottom:1px solid var(--line);align-items:center;background:var(--soft)">'+
+          '<div style="width:200px;flex-shrink:0;padding:0 8px 0 22px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-size:11px;font-weight:'+(_isG?'700':'400')+'">'+
+            (_isG?'<span onclick="wbsToggle(\''+m.id+'\')" style="cursor:pointer;display:inline-block;width:12px;color:var(--ink2);font-size:9px" title="折叠/展开">'+(_fold?'▸':'▾')+'</span> ':'<span style="display:inline-block;width:12px"></span>')+
+            '<span style="font-family:monospace;color:var(--ink3);margin-right:6px">'+(_codes[m.id]||'')+'</span>'+esc(m.name)+
+            (_sp?' <span style="color:var(--ink3);font-size:10px">'+_sp.done+'/'+_sp.n+'</span>':'')+
+          '</div>'+
+          '<div style="position:relative;flex:1;height:100%">'+weekends+todayLine+
+            (_sp?(function(){var gl=Math.round((parseDate(_sp.lo)-startT)/86400000),ge=Math.round((parseDate(_sp.hi)-startT)/86400000);
+              if(ge<0||gl>totalDays)return'';
+              var gs=Math.max(0,gl),g2=Math.min(Math.max(ge,gs+1),totalDays);
+              return '<div title="阶段汇总 '+_sp.done+'/'+_sp.n+' 完成 · '+_sp.lo+' ~ '+_sp.hi+'" style="position:absolute;left:'+(gs*DAY_W)+'px;top:8px;width:'+((g2-gs)*DAY_W-2)+'px;height:11px;background:#00B42A30;border:1.5px solid var(--ink2);border-radius:2px;z-index:3"></div>'})():'')+
+          '</div></div>';
+        rowY+=28;
+        if(!_fold)_kids.forEach(function(k){
+          var kd=msState(k);
+          var kc=kd.done?'#00B42A':kd.c;
+          var _html='';
+          if(k.date){
+            var kx=Math.round((parseDate(k.date)-startT)/86400000);
+            if(kx>=0&&kx<=totalDays){
+              var ke=(k.endDate&&k.endDate>k.date)?k.endDate:k.date;
+              var kx2=Math.min(Math.round((parseDate(ke)-startT)/86400000),totalDays);
+              if(kx2>kx){
+                _html='<div title="'+esc(k.name)+' '+k.date+' ~ '+ke+'（'+kd.label+'）" onclick="event.stopPropagation();msDrill(\''+k.id+'\')" style="cursor:pointer;position:absolute;left:'+(kx*DAY_W)+'px;top:8px;height:12px;width:'+((kx2-kx)*DAY_W-2)+'px;background:'+kc+';border-radius:6px;z-index:3"></div>'+
+                  '<div style="position:absolute;left:'+(kx2*DAY_W+6)+'px;top:9px;font-size:9px;color:var(--ink3);white-space:nowrap">'+esc(k.name)+'</div>';
+              }else{
+                var _hw=k.status==='未开始'&&diffDays(k.date)>=0;
+                _html='<div title="'+esc(k.name)+' '+k.date+'（'+kd.label+'）" onclick="event.stopPropagation();msDrill(\''+k.id+'\')" style="cursor:pointer;position:absolute;left:'+(kx*DAY_W-6)+'px;top:8px;width:12px;height:12px;'+(_hw?'background:var(--panel);border:2px solid var(--gray);':'background:'+kc+';border:1px solid var(--panel);')+'transform:rotate(45deg);z-index:3"></div>';
+              }
+              marks.push({id:k.id,x:kx*DAY_W,y:rowY+14});
+            }
+          }
+          rows+='<div style="display:flex;height:28px;border-bottom:1px solid var(--line);align-items:center">'+
+            '<div style="width:200px;flex-shrink:0;padding:0 8px 0 40px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-size:11px">'+
+              '<span style="font-family:monospace;color:var(--ink3);margin-right:6px">'+(_codes[k.id]||'')+'</span>'+esc(k.name)+
+            '</div>'+
+            '<div style="position:relative;flex:1;height:100%">'+weekends+todayLine+_html+'</div></div>';
+          rowY+=28;
+        });
+      });
+    }
     });
   });
 
@@ -2871,6 +3264,7 @@ function ganttHTML(){
     '<span><span style="display:inline-block;width:10px;height:10px;background:var(--panel);border:2px solid var(--gray);transform:rotate(45deg);margin-right:3px"></span>未开始</span>'+
     '<span><span style="display:inline-block;width:10px;height:10px;background:var(--warn);transform:rotate(45deg);margin-right:3px"></span>已逾期</span>'+
     '<span style="color:var(--ink3)">| 圆点=订单交期/批次</span>'+
+    '<span style="color:var(--ink3)">| 绿条=工期 · 深框条=阶段汇总（点项目行 ▸ 展开 WBS 任务树）</span>'+
     '<span style="color:var(--warn)">| 今天</span>'+
     '<span style="color:var(--ink3)">| 灰线=依赖（实线FS/虚线SS/点线FF/混合SF）</span>'+
     '<span style="color:var(--amber)">| 橙=关键路径</span>'+
@@ -2922,7 +3316,7 @@ function dateEvents(ds){
   var evs=[];
   /* 项目节点统一走里程碑实体（可增删改，用户编辑实时反映到看板） */
   (state.milestones||[]).forEach(function(m){
-    if(!m.date||m.date!==ds)return;
+    if(!m.date||m.date!==ds||m.kind==='group')return; /* C22：分组不进到期节点 */
     var p=byId(state.products,m.productId);
     evs.push({k:'node',t:(p?p.name:'（产品已删除）')+' · '+m.name,c:m.color||'#86909C',nav:'project',done:m.status==='已完成',id:m.productId,ms:m.id});
   });
@@ -3263,7 +3657,7 @@ function renderProjectRows(){
   renderProjBatch();
 }
 function projectPageGo(n){window._ppPage=n;renderProjectRows();}
-function goProjectDetail(id){state._pid=id;detailTab='概览';go('project')}
+function goProjectDetail(id){state._pid=id;detailTab='概览';pgScroll=0;go('project')} /* C30：切换项目重置甘特滚动记忆 */
 var detailTab='概览';
 function viewProjectDetail(){
   var pid=state._pid;
@@ -3277,16 +3671,16 @@ function viewProjectDetail(){
   var issues=state.issues.filter(function(i){return i.productId===pid||orders.some(function(o){return o.id===i.orderId})});
   var stc={'生产中':'#165DFF','打样中':'#722ED1','立项中':'#86909C','已完工':'#00B42A','已归档':'#C9CDD4'}[p.status]||'#86909C';
   // 里程碑时间轴（实体驱动：可增删改、点击下钻详情）
-  var mls=(state.milestones||[]).filter(function(m){return m.productId===pid}).sort(function(a,b){return a.date<b.date?-1:a.date>b.date?1:0});
+  var mls=(state.milestones||[]).filter(function(m){return m.productId===pid&&m.kind!=='group'}).sort(function(a,b){return a.date<b.date?-1:a.date>b.date?1:0}); /* C22：分组不进详情时间轴（msState 对无日期分组会出 NaN 文案） */
   var tl=mls.length?mls.map(function(m){
     var s=msState(m);
     return '<div style="display:flex;gap:12px;align-items:flex-start"><div style="width:20px;height:20px;border-radius:50%;background:'+s.c+';color:var(--on-accent);display:flex;align-items:center;justify-content:center;font-size:11px;flex-shrink:0;cursor:pointer" onclick="msDrill(\''+m.id+'\')" title="点击查看详情">'+(s.done?'\u2713':'')+'</div><div style="padding-bottom:16px;flex:1;cursor:pointer" onclick="msDrill(\''+m.id+'\')"><div style="font-weight:600;font-size:13px">'+esc(m.name)+' <span class="tag '+s.cls+'" style="color:'+s.c+';font-size:11px">'+s.label+'</span></div><div style="font-size:12px;color:var(--ink3);margin-top:2px">'+(m.date||'未安排')+(m.desc?' · '+esc(m.desc):'')+'</div></div><div style="display:flex;gap:6px;flex-shrink:0"><button class="btn ghost sm" onclick="editMilestone(\''+m.id+'\')">编辑</button><button class="btn ghost sm" onclick="delMilestone(\''+m.id+'\')">删</button></div></div>';
   }).join(''):'<div class="empty" style="padding:12px 0">暂无里程碑，点击「+ 里程碑」新增</div>';
-  var tabs=['概览','打样','成本','供应商','订单','质量'];
+  var tabs=['概览','甘特','打样','成本','供应商','订单','质量']; /* C25：新增甘特 tab */
   var tabHtml=tabs.map(function(t){return '<button class="'+(detailTab===t?'active':'')+'" onclick="detailTab=\''+t+'\';viewProjectDetail()">'+t+'</button>'}).join('');
   var body='';
   if(detailTab==='概览'){
-    body='<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px"><div class="card"><div class="sec-h"><h3>基本信息</h3><div style="display:flex;gap:8px;align-items:center"><button class="btn ghost sm" onclick="openPrintReport(\'project\')" title="生成本项目可打印报表（可另存为 PDF）">🖨 报表</button><button class="btn ghost sm" onclick="dataHealthCheck()" title="重算本项目相关派生数据并全量刷新">🔍 自检</button><button class="btn ghost sm" onclick="openEditProduct(\''+pid+'\')">编辑</button></div></div><table style="font-size:13px"><tr><td style="color:var(--ink3);padding:6px 0;width:100px">品类</td><td>'+p.cat+'</td></tr><tr><td style="color:var(--ink3);padding:6px 0">目标平台</td><td>'+p.platform+'</td></tr><tr><td style="color:var(--ink3);padding:6px 0">负责人</td><td>'+(p.owner||'—')+'</td></tr><tr><td style="color:var(--ink3);padding:6px 0">目标售价</td><td>$'+p.targetPrice+'</td></tr><tr><td style="color:var(--ink3);padding:6px 0">目标交期</td><td>'+(p.targetDate||'—')+'</td></tr><tr><td style="color:var(--ink3);padding:6px 0">当前进度</td><td>'+(p.progress||0)+'%</td></tr></table></div><div class="card"><div class="sec-h"><h3>里程碑</h3><div style="display:flex;gap:8px;align-items:center"><button class="btn ghost sm csv-btn" data-module="milestones" data-pid="'+pid+'" title="导出当前项目的里程碑">CSV</button><button class="btn ghost sm" onclick="importCSV(\'milestones\')">导入</button><button class="btn sm" onclick="openMilestone(\''+pid+'\')">+ 里程碑</button></div></div>'+tl+'</div></div>'+
+    body='<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px"><div class="card"><div class="sec-h"><h3>基本信息</h3><div style="display:flex;gap:8px;align-items:center"><button class="btn ghost sm" onclick="openPrintReport(\'project\')" title="生成本项目可打印报表（可另存为 PDF）">🖨 报表</button><button class="btn ghost sm" onclick="dataHealthCheck()" title="重算本项目相关派生数据并全量刷新">🔍 自检</button><button class="btn ghost sm" onclick="openEditProduct(\''+pid+'\')">编辑</button></div></div><table style="font-size:13px"><tr><td style="color:var(--ink3);padding:6px 0;width:100px">品类</td><td>'+p.cat+'</td></tr><tr><td style="color:var(--ink3);padding:6px 0">目标平台</td><td>'+p.platform+'</td></tr><tr><td style="color:var(--ink3);padding:6px 0">负责人</td><td>'+(p.owner||'—')+'</td></tr><tr><td style="color:var(--ink3);padding:6px 0">目标售价</td><td>$'+p.targetPrice+'</td></tr><tr><td style="color:var(--ink3);padding:6px 0">目标交期</td><td>'+(p.targetDate||'—')+'</td></tr><tr><td style="color:var(--ink3);padding:6px 0">当前进度</td><td>'+(p.progress||0)+'%</td></tr></table></div><div class="card"><div class="sec-h"><h3>里程碑</h3><div style="display:flex;gap:8px;align-items:center"><button class="btn ghost sm csv-btn" data-module="milestones" data-pid="'+pid+'" title="导出当前项目的里程碑">CSV</button><button class="btn ghost sm" onclick="importCSV(\'milestones\')">导入</button><button class="btn sm" onclick="openMilestone(\''+pid+'\',\'ms\')">+ 里程碑</button></div></div>'+tl+'</div></div>'+
     '<div class="card" style="margin-top:16px">'+baselineCardHTML(pid)+'</div>';
   }else if(detailTab==='打样'){
     var sr=samples.map(function(x){var _sd=overdueState(diffDays(x.due));var _sc=_sd.lvl==='severe'?'#C41D1D':_sd.lvl==='over'?'#F53F3F':_sd.lvl==='soon'?'#FF7D00':'#86909C';return '<tr><td>第'+x.round+'轮</td><td>'+esc(sname(x.supplierId))+'</td><td class="tnum">$'+x.cost+'</td><td>'+x.due+'</td><td><span class="tag blue">'+x.status+'</span></td><td'+(diffDays(x.due)<0?' title="'+ovTip('sample',esc(pname(x.productId))+' 第'+x.round+'轮打样',x.due)+'"':'')+' style="color:'+_sc+';font-weight:600">'+_sd.label+'</td><td style="white-space:nowrap"><button class="btn ghost sm" onclick="editSample(\''+x.id+'\')">编辑</button> <button class="btn ghost sm" onclick="delSample(\''+x.id+'\')">删</button></td></tr>'}).join('')||'<tr><td colspan="7" class="empty">暂无打样记录，点击「+ 新增打样」录入</td></tr>';
@@ -3298,8 +3692,10 @@ function viewProjectDetail(){
     var qr=quotes.map(function(q){return '<tr><td>'+esc(sname(q.supplierId))+'</td><td class="tnum">$'+q.price+'</td><td class="tnum">'+q.moq+'</td><td>'+q.leadTime+'天</td><td>'+(q.status==='已采纳'?'<span class="tag ok">已采纳</span>':'<span class="tag gray">'+q.status+'</span>')+'</td><td style="white-space:nowrap"><button class="btn ghost sm" onclick="editQuote(\''+q.id+'\')">编辑</button> <button class="btn ghost sm" onclick="delQuote(\''+q.id+'\')">删</button></td></tr>'}).join('')||'<tr><td colspan="6" class="empty">暂无报价，点击「+ 新增报价」收集比价</td></tr>';
     body='<div class="card"><div class="sec-h"><h3>报价对比</h3><button class="btn sm" onclick="openQuote(\''+pid+'\')">+ 新增报价</button></div><div class="table-wrap"><table><thead><tr><th>供应商</th><th>单价</th><th>MOQ</th><th>交期</th><th>状态</th><th></th></tr></thead><tbody>'+qr+'</tbody></table></div></div>';
   }else if(detailTab==='订单'){
-    var or=orders.map(function(o){var _s=overdueState(diffDays(orderDue(o)));var _c=_s.lvl==='severe'?'#C41D1D':_s.lvl==='over'?'#F53F3F':_s.lvl==='soon'?'#FF7D00':'#86909C';return '<tr><td><strong>'+o.code+'</strong></td><td class="tnum">'+o.qty+'</td><td class="tnum">$'+(o.price*o.qty).toFixed(0)+'</td><td>'+orderDue(o)+'</td><td><span class="tag blue">'+o.status+'</span></td><td'+(diffDays(orderDue(o))<0?' title="'+ovTip('order',esc(o.code),orderDue(o))+'"':'')+' style="color:'+_c+';font-weight:600">'+_s.label+'</td><td style="white-space:nowrap"><button class="btn ghost sm" onclick="editOrder(\''+o.id+'\')">编辑</button> <button class="btn ghost sm" onclick="delOrder(\''+o.id+'\')">删</button></td></tr>'}).join('')||'<tr><td colspan="7" class="empty">暂无订单，点击「+ 录入订单」下单</td></tr>';
+    var or=orders.map(function(o){var _dn=o.step>=4||o.status==='已完成';var _s=overdueState(diffDays(orderDue(o)));var _c=_s.lvl==='severe'?'#C41D1D':_s.lvl==='over'?'#F53F3F':_s.lvl==='soon'?'#FF7D00':'#86909C';return '<tr><td><strong>'+o.code+'</strong></td><td class="tnum">'+o.qty+'</td><td class="tnum">$'+(o.price*o.qty).toFixed(0)+'</td><td>'+orderDue(o)+'</td><td><span class="tag blue">'+o.status+'</span></td><td'+(_dn?'':(diffDays(orderDue(o))<0?' title="'+ovTip('order',esc(o.code),orderDue(o))+'"':''))+' style="color:'+(_dn?'#00B42A':_c)+';font-weight:600">'+(_dn?'✓ 已完成':_s.label)+'</td><td style="white-space:nowrap"><button class="btn ghost sm" onclick="editOrder(\''+o.id+'\')">编辑</button> <button class="btn ghost sm" onclick="delOrder(\''+o.id+'\')">删</button></td></tr>'}).join('')||'<tr><td colspan="7" class="empty">暂无订单，点击「+ 录入订单」下单</td></tr>'; /* C24：已收货订单终态守卫（对齐订单列表口径，已收货不计逾期） */
     body='<div class="card"><div class="sec-h"><h3>订单明细</h3><button class="btn sm" onclick="openOrder(\''+pid+'\')">+ 录入订单</button></div><div class="table-wrap"><table><thead><tr><th>订单号</th><th>数量</th><th>金额</th><th>交期</th><th>状态</th><th>倒计时</th><th></th></tr></thead><tbody>'+or+'</tbody></table></div></div>';
+  }else if(detailTab==='甘特'){ /* C25：项目详情甘特图（参考图形态：WBS 任务树 + 时间条形区） */
+    body='<div class="card"><div class="sec-h"><h3>项目甘特图</h3><div style="display:flex;gap:8px"><button class="btn ghost sm" onclick="openMilestone(\''+pid+'\',\'task\')">+ 任务</button><button class="btn ghost sm" onclick="openMilestone(\''+pid+'\',\'ms\')">+ 里程碑</button><button class="btn ghost sm" onclick="openMilestone(\''+pid+'\',\'group\')">+ 阶段分组</button></div></div>'+projGanttHTML(pid)+'</div>'; /* C32：三类直达入口（预设类型弹窗），保存后 persist+RENDER 实时上甘特 */
   }else{
     var ir=issues.map(function(i){return '<tr><td>'+esc(i.title)+'</td><td>'+esc(i.type)+'</td><td>'+(i.batchDate?'<span class="tag blue">批次 '+esc(i.batchDate)+'</span>':'—')+'</td><td>'+esc(i.verdict)+'</td><td><span class="tag '+(i.status==='待处理'?'warn':'amber')+'">'+i.status+'</span></td><td style="white-space:nowrap"><button class="btn ghost sm" onclick="editIssue(\''+i.id+'\')">编辑</button> <button class="btn ghost sm" onclick="delIssue(\''+i.id+'\')">删</button></td></tr>'}).join('')||'<tr><td colspan="6" class="empty">暂无客诉，点击「+ 新增客诉」记录问题</td></tr>';
     body='<div class="card"><div class="sec-h"><h3>客诉记录</h3><button class="btn sm" onclick="openIssue(\''+pid+'\')">+ 新增客诉</button></div><div class="table-wrap"><table><thead><tr><th>问题</th><th>类型</th><th>批次</th><th>判定</th><th>状态</th><th></th></tr></thead><tbody>'+ir+'</tbody></table></div></div>';
@@ -3320,6 +3716,7 @@ function viewProjectDetail(){
   '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:16px"><div style="text-align:center"><div style="font-size:11px;color:var(--ink3)">BOM成本</div><div style="font-weight:700;margin-top:4px">$'+fp.toFixed(2)+'</div></div><div style="text-align:center"><div style="font-size:11px;color:var(--ink3)">关联供应商</div><div style="font-weight:700;margin-top:4px">'+quotes.length+'</div></div><div style="text-align:center"><div style="font-size:11px;color:var(--ink3)">订单数</div><div style="font-weight:700;margin-top:4px">'+orders.length+'</div></div><div style="text-align:center"><div style="font-size:11px;color:var(--ink3)">客诉数</div><div style="font-weight:700;margin-top:4px">'+issues.length+'</div></div></div></div>'+
   overBanner+
   '<div class="tabs">'+tabHtml+'</div>'+body;
+  restorePgScroll(); /* C33：tab 直切甘特时恢复横向滚动位（原仅 RENDER 路径恢复，切走再切回会跳回最左） */
 }
 var prodTab='list';
 function viewProduct(){
@@ -3514,7 +3911,8 @@ function editProcess(id){
       logAudit('工艺调价：'+pr.name+' $'+old+' → $'+pr.refPrice+'（影响 '+affected.length+' 个产品BOM）');
       toast('已保存，'+affected.length+' 个产品成本快照已联动更新');
     }else{toast('已保存')}
-    persist();closeModal();renderCostTab();
+    persist();closeModal(); /* C29：实时联动守卫 */
+    if(ROUTE==='cost')renderCostTab();else RENDER();
   });
 }
 /* C11：编辑物料基础信息（名称/品类/规格/单位/供应商/状态），改价走 openMaterialPrice */
@@ -3550,11 +3948,11 @@ function openMaterialPrice(mid){
     m.price=np;
     affected.forEach(function(pid){snapshotCost(true,pid)});
     logAudit('物料调价：'+m.name+' $'+m.price+' → $'+np+'（影响 '+affected.length+' 个产品BOM，成本快照已更新）');
-    persist();closeModal();toast('调价成功，'+affected.length+' 个产品成本快照已联动更新');renderCostTab();
+    persist();closeModal();toast('调价成功，'+affected.length+' 个产品成本快照已联动更新'); /* C29：实时联动守卫 */if(ROUTE==='cost')renderCostTab();else RENDER();
   });
 }
-function openMaterial(){openModal('新增物料','<div class="f-row"><div class="f-item"><label>名称</label><input id="f-name"></div><div class="f-item"><label>品类</label><select id="f-cat"><option>金属</option><option>布料</option><option>塑料</option><option>电子元件</option><option>包装</option></select></div></div><div class="f-row"><div class="f-item"><label>单位</label><input id="f-unit" value="个"></div><div class="f-item"><label>单价(USD)</label><input id="f-price" type="number" value="1"></div></div>',function(){if(!fv('f-name')){toast('请填写名称');return}var nm=fv('f-name');state.materials.push({id:nextId(state.materials,'m'),name:nm,cat:fv('f-cat'),spec:'',unit:fv('f-unit'),price:+fv('f-price'),supplier:'',status:'启用'});logAudit('新增物料：'+nm+'（'+fv('f-cat')+' $'+fv('f-price')+'/'+fv('f-unit')+'）');persist();closeModal();toast('已新增');renderCostTab();});}
-function openProcess(){openModal('新增工艺','<div class="f-item"><label>名称</label><input id="f-name"></div><div class="f-row"><div class="f-item"><label>参考单价</label><input id="f-price" type="number" value="0.5"></div><div class="f-item"><label>损耗率(%)</label><input id="f-loss" type="number" value="5"></div></div>',function(){if(!fv('f-name')){toast('请填写名称');return}var nm=fv('f-name');state.processes.push({id:nextId(state.processes,'pr'),name:nm,cat:'其他',pricing:'按件',refPrice:+fv('f-price'),lossRate:+fv('f-loss')/100,status:'启用'});logAudit('新增工艺：'+nm+'（$'+fv('f-price')+'/件）');persist();closeModal();toast('已新增');renderCostTab();});}
+function openMaterial(){openModal('新增物料','<div class="f-row"><div class="f-item"><label>名称</label><input id="f-name"></div><div class="f-item"><label>品类</label><select id="f-cat"><option>金属</option><option>布料</option><option>塑料</option><option>电子元件</option><option>包装</option></select></div></div><div class="f-row"><div class="f-item"><label>单位</label><input id="f-unit" value="个"></div><div class="f-item"><label>单价(USD)</label><input id="f-price" type="number" value="1"></div></div>',function(){if(!fv('f-name')){toast('请填写名称');return}var nm=fv('f-name');state.materials.push({id:nextId(state.materials,'m'),name:nm,cat:fv('f-cat'),spec:'',unit:fv('f-unit'),price:+fv('f-price'),supplier:'',status:'启用'});logAudit('新增物料：'+nm+'（'+fv('f-cat')+' $'+fv('f-price')+'/'+fv('f-unit')+'）');persist();closeModal();toast('已新增');if(ROUTE==='cost')renderCostTab();else RENDER();});}
+function openProcess(){openModal('新增工艺','<div class="f-item"><label>名称</label><input id="f-name"></div><div class="f-row"><div class="f-item"><label>参考单价</label><input id="f-price" type="number" value="0.5"></div><div class="f-item"><label>损耗率(%)</label><input id="f-loss" type="number" value="5"></div></div>',function(){if(!fv('f-name')){toast('请填写名称');return}var nm=fv('f-name');state.processes.push({id:nextId(state.processes,'pr'),name:nm,cat:'其他',pricing:'按件',refPrice:+fv('f-price'),lossRate:+fv('f-loss')/100,status:'启用'});logAudit('新增工艺：'+nm+'（$'+fv('f-price')+'/件）');persist();closeModal();toast('已新增');if(ROUTE==='cost')renderCostTab();else RENDER();});}
 
 /* ===== 视图：供应商 ===== */
 function viewSupplier(){
@@ -4391,12 +4789,16 @@ function scheduleRender(){
   var fire=function(){_renderQueued=false;RENDER()};
   if(typeof requestAnimationFrame==='function')requestAnimationFrame(fire);else setTimeout(fire,16);
 }
+function restorePgScroll(){var _pg=document.getElementById('pg-scroll');if(_pg&&pgScroll>0)_pg.scrollLeft=pgScroll} /* C33：甘特横向滚动恢复抽公用——tab 切换走 viewProjectDetail 不经 RENDER，双站点都调（防甘特⇄其他 tab 往返滚动位丢失） */
 function RENDER(){
   var t0=Date.now();
   dbg('view','渲染 '+ROUTE);
   try{
     VIEWS[ROUTE]();
-    dbg('view','渲染完成 '+ROUTE+'（'+(Date.now()-t0)+'ms）');
+    restorePgScroll(); /* C30+C33 */
+    var _rt=Date.now()-t0; /* C23：慢渲染观测——超 300ms 告警，正常走 debug 防噪声 */
+    if(_rt>300)logLog('warn','view','渲染 '+ROUTE+' 耗时 '+_rt+'ms（超 300ms 阈值，数据量大或存在低效渲染）');
+    else dbg('view','渲染完成 '+ROUTE+'（'+_rt+'ms）');
   }catch(err){
     logLog('error','view','视图 '+ROUTE+' 渲染失败：'+err.message,err.stack);
     toast('页面渲染出错：'+err.message+'（已记录到日志）');

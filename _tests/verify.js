@@ -16,7 +16,7 @@ function makeEl(tag) {
     tagName: tag, innerHTML: '', textContent: '', value: '',
     style: {}, type: '', accept: '', onchange: null, onclick: null, oninput: null,
     classList: { add() {}, remove() {}, contains() { return false; } },
-    appendChild() {}, addEventListener() {}, click() { if (this.onclick) this.onclick(); },
+    appendChild() {}, addEventListener() {}, remove() {}, click() { if (this.onclick) this.onclick(); },
     _attrs: {}, setAttribute(k, v) { this._attrs[k] = String(v); }, getAttribute(k) { return (k in this._attrs) ? this._attrs[k] : null; },
     querySelector() { return null; }, closest() { return null; },
     href: '', download: '', files: [],
@@ -27,11 +27,13 @@ const elCache = {};
 const htmlRoot = makeEl('html'); /* documentElement 桩（C7 主题断言用，属性存储真实工作） */
 const docStub = {
   documentElement: htmlRoot,
+  body: makeEl('body'), /* C34：pgDragCancel 的 body.classList.remove 需要（拖拽全局光标清理） */
   querySelector(sel) { if (!elCache[sel]) elCache[sel] = makeEl('q'); return elCache[sel]; },
   querySelectorAll() { return []; },
   getElementById(id) { return docStub.querySelector('#' + id); },
   createElement(tag) { return makeEl(tag); },
-  addEventListener() {}
+  addEventListener() {},
+  removeEventListener() {} /* C34：拖拽取消路径真实调用 removeEventListener（原 stub 缺失导致行为批次假阳性报错） */
 };
 const store = {};
 const lsStub = {
@@ -42,6 +44,8 @@ const lsStub = {
 function BlobP(parts) { this._s = parts.map(String).join(''); }
 const sandbox = {
   document: docStub, localStorage: lsStub,
+  navigator: { userAgent: 'Mozilla/5.0 TestUA', platform: 'Win32', language: 'zh-CN' }, /* C23：诊断包环境元数据桩 */
+  screen: { width: 1920, height: 1080 },
   crypto: {
     getRandomValues: (arr) => { for (let i = 0; i < arr.length; i++) arr[i] = Math.floor(Math.random() * 256); return arr; },
     subtle: {
@@ -302,9 +306,9 @@ check('logLog/debug 进环形缓冲', sandbox.LOGS.length === logN0 + 1);
 sandbox.logLog('error', 'test', '错误消息E1', '堆栈占位');
 const stored = lsStub.getItem('supplydev_logs_v1') || '';
 check('error 级立即落盘', stored.indexOf('错误消息E1') >= 0);
-/* 环形缓冲上限：灌 700 条后应收敛 */
-for (let i = 0; i < 700; i++) sandbox.logLog('debug', 'test', 'fill' + i);
-check('环形缓冲上限 ≤600', sandbox.LOGS.length <= 600, 'len=' + sandbox.LOGS.length);
+/* 环形缓冲上限：灌超内存上限后应收敛（C23 容量提升至 1000/800，落盘下限收敛验证） */
+for (let i = 0; i < sandbox.LOG_CAP_MEM + 50; i++) sandbox.logLog('debug', 'test', 'fill' + i);
+check('环形缓冲上限 ≤内存上限', sandbox.LOGS.length <= sandbox.LOG_CAP_MEM && sandbox.LOGS.length >= sandbox.LOG_CAP_DISK, 'len=' + sandbox.LOGS.length + ' cap=' + sandbox.LOG_CAP_MEM);
 /* 错误边界：视图抛错不再白屏 */
 sandbox.VIEWS.__boom = function () { throw new Error('boom-x'); };
 sandbox.ROUTE = '__boom';
@@ -2444,6 +2448,654 @@ check('C10 KM2 重复定义已收敛', src.indexOf('var KM2=') < 0);
     sandbox.go('dashboard');
   } catch (e) { check('C20 批次', false, e.message); }
 })();
+
+
+/* ===== C22 批次：甘特图两级 WBS 树 + 里程碑工期条（对标进度猫） ===== */
+(function () {
+  try {
+    const st = sandbox.state, T = sandbox.todayStr();
+    /* 1) 源码形态断言 */
+    check('C22 实体扩展与帮助函数（msIsGroup/msGroupSpan/msWbsCodes）', html.indexOf("function msIsGroup(m){return m!=null&&m.kind==='group'}") > 0 && html.indexOf('function msGroupSpan(g)') > 0 && html.indexOf('function msWbsCodes(pid)') > 0);
+    check('C22 recalcProgress 排除分组', html.indexOf("return m.productId===pid&&m.kind!=='group'") > 0);
+    check('C22 进度/详情时间轴/打印三站排除分组（≥3 处）', (html.match(/m\.productId===pid&&m\.kind!=='group'/g) || []).length >= 3);
+    check('C22 msSummary 排除分组', html.indexOf("return m.productId===p.id&&m.kind!=='group'") > 0);
+    check('C22 基线快照跳过分组', html.indexOf('m.productId===pid&&m.date&&!m.kind') > 0);
+    check('C22 删分组子项上移顶层', html.indexOf("if(x.parentId===id)x.parentId=''") > 0);
+    check('C22 addDep 分组拦截', html.indexOf('阶段分组不参与依赖连线') > 0);
+    check('C22 CSV 导入新列（类型/父阶段/结束日期）', ["cell(cells,'类型')", "cell(cells,'父阶段')", "cell(cells,'结束日期')", "mstype==='阶段分组'"].every(x => html.indexOf(x) > 0));
+    check('C22 导出补列（endDate/kind/parentId）', html.indexOf("{key:'endDate',label:'结束日期'},{key:'kind',label:'类型'},{key:'parentId',label:'父阶段'}") > 0);
+    check('C22 甘特展开状态与箭头', (html.match(/ganttExpand\[p\.id\]/g) || []).length >= 1 && /ganttExpandToggle\(.{2}'\+p\.id/.test(html));
+    check('C22 分组汇总条与工期条渲染', html.indexOf('background:#00B42A30') > 0 && html.indexOf("title=\"阶段汇总 '+_sp.done+'/'+_sp.n") > 0);
+    check('C22 弹窗类型/归属阶段/结束日期字段', ['f-mstype', 'f-msgroup', 'f-msend'].every(x => html.indexOf('id="' + x + '"') > 0));
+check('C22r2 逾期聚合/到期节点排除分组', html.indexOf("||_done(byId(state.products,m.productId))||m.kind==='group'") > 0 && html.indexOf("m.date!==ds||m.kind==='group'") > 0);
+check('C22r2 基线依赖链排除分组', html.indexOf('if(m.productId&&!m.kind)') > 0);
+check('C22r2 CSV 依赖按名解析排除分组', html.indexOf("m.name===dn&&m.kind!=='group'") > 0 && html.indexOf("m.name===dtn&&m.kind!=='group'") > 0);
+check('C22r2 分组强制顶层（弹窗+CSV）+ msChildren 防御', html.indexOf("parentId:isG?'':gid") > 0 && html.indexOf("parentId:msIsG?'':msPid") > 0 && html.indexOf("m.parentId===gid&&m.kind!=='group'") > 0);
+
+    /* 2) 行为级：分组不计进度 + WBS 编码 + 汇总跨度 */
+    const mk22 = (o) => Object.assign({ id: 'x', name: 'x', cat: '', platform: '', status: '生产中', owner: '', targetPrice: 1, ideaDate: T, sampleDue: '' }, o);
+    st.products.push(mk22({ id: 'c22p', name: 'C22项目', targetDate: sandbox.addDays(T, 30), progress: 0 }));
+    st.milestones.push(
+      { id: 'c22g', productId: 'c22p', name: 'C22阶段一', kind: 'group', parentId: '', date: '', status: '未开始', desc: '', color: '#165DFF', endDate: '' },
+      { id: 'c22m1', productId: 'c22p', name: 'C22任务A', parentId: 'c22g', date: sandbox.addDays(T, 1), endDate: sandbox.addDays(T, 5), status: '未开始', desc: '', color: '#165DFF' },
+      { id: 'c22m2', productId: 'c22p', name: 'C22任务B', parentId: 'c22g', date: sandbox.addDays(T, 6), status: '未开始', desc: '', color: '#165DFF' });
+    const p22 = st.products.find(p => p.id === 'c22p');
+    sandbox.recalcProgress('c22p');
+    check('C22 分组不计入进度（0%）', (p22.progress || 0) === 0);
+    st.milestones.find(m => m.id === 'c22m1').status = '已完成';
+    sandbox.recalcProgress('c22p');
+    check('C22 里程碑 1/2 完成 → 进度 50%（分组不入分母）', p22.progress === 50);
+    const ms22 = sandbox.msSummary(p22);
+    check('C22 msSummary 排除分组（total=2 done=1）', ms22.total === 2 && ms22.done === 1);
+    const g22 = st.milestones.find(m => m.id === 'c22g');
+    const sp = sandbox.msGroupSpan(g22);
+    check('C22 分组汇总跨度 min~max + done/n', sp && sp.lo === sandbox.addDays(T, 1) && sp.hi === sandbox.addDays(T, 6) && sp.n === 2 && sp.done === 1, JSON.stringify(sp));
+    const codes = sandbox.msWbsCodes('c22p');
+    check('C22 WBS 编码（顶层 1 / 子项 1.1、1.2）', codes.c22g === '1' && codes.c22m1 === '1.1' && codes.c22m2 === '1.2');
+    check('C22 addDep 分组拦截返回 false 且不入 deps', sandbox.addDep('c22g', 'c22m2', 'FS', true) === false && !(st.deps || []).some(d => d.from === 'c22g' || d.to === 'c22g'));
+
+    /* 3) 行为级：甘特展开渲染 + 折叠（甘特图在仪表盘路由） */
+    sandbox.go('dashboard');
+    sandbox.ganttExpandToggle('c22p'); /* RENDER 当前路由即含甘特 */
+    const gh = sandbox.document.getElementById('view').innerHTML;
+    let gerr = '';
+    try { sandbox.ganttHTML(); } catch (e) { gerr = e.message; }
+    check('C22 展开渲染：分组汇总条+工期条+WBS 编码', gh.indexOf('background:#00B42A30') >= 0 && gh.indexOf('C22任务A') >= 0 && gh.indexOf('阶段汇总 1/2 完成') >= 0, 'gerr=' + gerr + ' | 任务A=' + gh.indexOf('C22任务A') + ' | 汇总条=' + gh.indexOf('background:#00B42A30'));
+    sandbox.wbsToggle('c22g');
+    const gh2 = sandbox.document.getElementById('view').innerHTML;
+    check('C22 折叠分组后子行隐藏（汇总条仍在）', gh2.indexOf('C22任务A') < 0 && gh2.indexOf('background:#00B42A30') >= 0, 'gerr2=' + gerr + ' | 任务A2=' + gh2.indexOf('C22任务A'));
+    sandbox.wbsToggle('c22g');
+
+    /* 4) 行为级：删分组子项上移 + 进度不回退 */
+    sandbox.delMilestone('c22g');
+    check('C22 删分组子项上移顶层', !st.milestones.some(m => m.id === 'c22g') && st.milestones.find(m => m.id === 'c22m1').parentId === '' && st.milestones.find(m => m.id === 'c22m2').parentId === '');
+    sandbox.recalcProgress('c22p');
+    // C22 上移后进度=完成比例（persist→recomputeDerived 会自动补「交付」基线里程碑，动态计算期望）
+    const arr22 = st.milestones.filter(m => m.productId === 'c22p' && m.kind !== 'group');
+    const exp22 = Math.round(100 * arr22.filter(m => m.status === '已完成').length / arr22.length);
+    check('C22 上移后进度符合完成比例（分组已删，子项参与）', p22.progress === exp22 && st.milestones.find(m => m.id === 'c22m1').status === '已完成', 'progress=' + p22.progress + ' exp=' + exp22 + ' n=' + arr22.length);
+
+    /* 5) 清理压测数据 */
+    st.products = st.products.filter(p => p.id !== 'c22p');
+    st.milestones = st.milestones.filter(m => m.productId !== 'c22p'); /* 连带清理 recomputeDerived 自动补的基线里程碑 */
+    delete sandbox.ganttExpand['c22p'];
+    sandbox.go('dashboard');
+  } catch (e) { check('C22 批次', false, e.message); }
+})();
+
+/* ===== C23 批次：日志体系成熟化（分级/序号/会话/诊断包/性能观测/打点覆盖） =====
+   注：整体置于异步块——等 C6 等前置异步流（Blob 捕获/modal 链路）全部结束后再执行，
+   防止本批次的 Blob 桩与 openLogViewer 覆盖 modal-ok 污染前置链路（实测翻车一次）。 */
+pendingAsync++;
+(async function () {
+  try {
+    for (let w = 0; w < 600 && pendingAsync > 1; w++) await new Promise(r => setTimeout(r, 10));
+    /* 1) 源码级：内核常量与函数 */
+    check('C23 内核：容量常量/自增序号/会话标识', html.indexOf('LOG_CAP_MEM=1000,LOG_CAP_DISK=800') > 0 && html.indexOf('q:LOG_SEQ++') > 0 && html.indexOf('LOG_SEQ=(function(){var mx=0') > 0 && /var LOG_SESSION=\{id:Math\.random\(\)\.toString\(36\)\.slice\(2,8\),start:nowDT\(\),ver:getAppVer\(\)\}/.test(html));
+    check('C23 getAppVer 从窗口标题解析版本（兜底 dev）', /function getAppVer\(\)\{var m=\(typeof document!=='undefined'&&document\.title\|\|''\)\.match\(\/v\(\\d\+\\\.\\d\+\\\.\\d\+\)\/\);return m\?\('v'\+m\[1\]\):'dev'\}/.test(html));
+    check('C23 查看器：级别计数徽章+诊断包按钮+行首序号', html.indexOf('cnt[l]||0') > 0 && html.indexOf('exportDiagnostics()" title=') > 0 && html.indexOf('title="日志序号"') > 0);
+    check('C23 性能观测：慢渲染 300ms / 慢落盘 500ms 告警', html.indexOf("耗时 '+_rt+'ms（超 300ms 阈值") > 0 && html.indexOf("耗时 '+_st+'ms（超 500ms 阈值") > 0);
+    check('C23 打点：登录/CSV导出/备份分级/评分/导航', html.indexOf("logAudit('用户登录：'+u)") > 0 && html.indexOf("logAudit('导出 CSV：'+(MOD_NAMES[name]||name)") > 0 && html.indexOf("logLog('error','backup','备份通道请求失败：'") > 0 && html.indexOf("logLog('warn','backup','备份通道返回 HTTP '+resp.status)") > 0 && html.indexOf("dbg('backup','备份通道未配置") > 0 && html.indexOf("dbg('score','评分重算：'") > 0 && html.indexOf("dbg('nav','路由切换 '") > 0);
+
+    /* 2) 行为级：seq 自增 */
+    const seq0 = sandbox.LOG_SEQ;
+    sandbox.logLog('debug', 'c23test', '行为测试-序号');
+    const last = sandbox.LOGS[sandbox.LOGS.length - 1];
+    check('C23 行为：logLog 递增序号并写入条目', last.q === seq0 && last.m === 'c23test' && typeof last.t === 'string' && last.t.length >= 16, 'q=' + last.q + ' seq0=' + seq0);
+
+    /* 3) 行为级：getAppVer 解析窗口标题 */
+    const oldTitle = sandbox.document.title;
+    sandbox.document.title = 'ACE 开发助手 v1.0.53 · 产品与供应链开发（本地版）';
+    const v1 = sandbox.getAppVer();
+    sandbox.document.title = 'ACE 开发助手';
+    const v2 = sandbox.getAppVer();
+    check('C23 行为：getAppVer 命中 v1.0.53 / 无版本兜底 dev', v1 === 'v1.0.53' && v2 === 'dev', 'v1=' + v1 + ' v2=' + v2);
+    /* 步骤 4 的诊断包导出保持在带版本标题下进行（session.ver 断言依赖） */
+
+    /* 4) 行为级：诊断包导出结构（Blob 桩隔离：返回平面对象，不复入外层捕获链） */
+    let diagCap = null; const _Outer23 = sandbox.Blob;
+    sandbox.Blob = function (parts) { diagCap = parts.map(String).join(''); return { _s: diagCap }; };
+    sandbox.document.title = 'ACE 开发助手 v1.0.53 · 产品与供应链开发（本地版）'; /* v2 测试已覆盖标题，导出前重设（session.ver 依赖） */
+    sandbox.exportDiagnostics();
+    sandbox.Blob = _Outer23;
+    sandbox.document.title = oldTitle;
+    const pkg = JSON.parse(diagCap);
+    check('C23 行为：诊断包含 ver/session/env/logStats/logs/auditTail 且不含业务主体', pkg.app === 'supplydev' && pkg.ver === 'v1.0.53' && pkg.session && pkg.session.id && typeof pkg.session.ver === 'string' && pkg.session.start /* session.ver 为启动时快照（沙盘加载无标题=dev，真实 exe 有标题） */ && pkg.env && pkg.env.ua === 'Mozilla/5.0 TestUA' && pkg.env.screen === '1920x1080' && typeof pkg.env.storage === 'number' && pkg.logStats && Array.isArray(pkg.logs) && pkg.logs.length > 0 && Array.isArray(pkg.auditTail) && !pkg.products && !pkg.state, JSON.stringify({ver:pkg.ver,sid:pkg.session&&pkg.session.id,sv:pkg.session&&pkg.session.ver,ua:pkg.env&&pkg.env.ua,scr:pkg.env&&pkg.env.screen,ls:pkg.env&&typeof pkg.env.storage,stats:!!pkg.logStats,logs:pkg.logs&&pkg.logs.length,audit:Array.isArray(pkg.auditTail)}));
+
+    /* 5) 行为级：warn 级立即落盘（LOG_KEY 同步镜像可查） */
+    const keyCnt = JSON.parse(sandbox.localStorage.getItem(sandbox.LOG_KEY) || '[]').length;
+    check('C23 行为：warn 触发立即落盘（LOG_KEY 同步更新）', keyCnt > 0, 'keyCnt=' + keyCnt);
+    check('C23r2 诊断包定位字段：storage 标准计数 + idb/bkport', html.indexOf("localStorage.key(i)") > 0 && html.indexOf("idb:typeof DB_READY!=='undefined'?!!DB_READY:null") > 0 && html.indexOf("bkport:typeof window.__BKPORT==='number'?window.__BKPORT:null") > 0);
+    check('C23r2 诊断包 idb 字段随沙盘 DB 状态输出', pkg.env.idb === false || pkg.env.idb === true, 'idb=' + pkg.env.idb);
+
+    /* 6) 行为级：查看器渲染（计数徽章 + 诊断包按钮进入 DOM） */
+    sandbox.openLogViewer();
+    const modalHtml = sandbox.document.querySelector('#modal-box').innerHTML;
+    check('C23 行为：查看器渲染出级别徽章与诊断包按钮', modalHtml.indexOf('诊断包') >= 0 && /ERROR \d+/.test(modalHtml) && modalHtml.indexOf('导出') >= 0, 'len=' + modalHtml.length);
+    sandbox.closeModal();
+  } catch (e) { check('C23 批次', false, e.message + ' | ' + String(e.stack).split('\n')[1]); }
+  pendingAsync--;
+})();
+
+
+/* ===== C24 批次：订单终态守卫孪生站点修复 + 孤儿 parentId 净化（对抗性审查轮） ===== */
+pendingAsync++;
+(async function () {
+  try {
+    for (let w = 0; w < 600 && pendingAsync > 1; w++) await new Promise(r => setTimeout(r, 10));
+    const st = sandbox.state, T = sandbox.todayStr();
+    /* 1) 源码级：两处终态守卫 + 净化器落位 */
+    check('C24 甘特下钻订单行终态守卫', (html.match(/_dn=o\.step>=4\|\|o\.status==='已完成'/g) || []).length === 2 && html.indexOf("(_dn?'✓ 已完成':_s.label)") > 0);
+    check('C24 recomputeDerived 孤儿 parentId 净化器', html.indexOf("if(!g||g.kind!=='group'||g.productId!==m.productId)m.parentId=''") > 0);
+
+    /* 2) 行为级：ganttDrill 已收货订单显示 ✓ 已完成（修复前显示逾期红标） */
+    const mk24 = (o) => Object.assign({ id: 'x', name: 'x', cat: '', platform: '', status: '生产中', owner: '', targetPrice: 1, ideaDate: T, sampleDue: '' }, o);
+    st.products.push(mk24({ id: 'c24p', name: 'C24项目', targetDate: sandbox.addDays(T, 30) }));
+    st.orders.push(
+      { id: 'c24done', code: 'C24-DONE', productId: 'c24p', supplierId: 's1', qty: 10, price: 1, due: sandbox.addDays(T, -9), status: '已发货', payStatus: '未付款', step: 4, batches: [] },
+      { id: 'c24over', code: 'C24-OVER', productId: 'c24p', supplierId: 's1', qty: 10, price: 1, due: sandbox.addDays(T, -9), status: '生产中', payStatus: '未付款', step: 2, batches: [] });
+    sandbox.ganttDrill('c24p');
+    const m24 = sandbox.document.querySelector('#modal-box').innerHTML;
+    check('C24 行为：下钻弹窗已收货订单=✓ 已完成', m24.indexOf('C24-DONE') > 0 && m24.indexOf('✓ 已完成') > 0, 'done=' + m24.indexOf('✓ 已完成'));
+    check('C24 行为：未收货逾期订单仍显示逾期', m24.indexOf('C24-OVER') > 0 && /逾期/.test(m24));
+    sandbox.closeModal();
+
+    /* 3) 行为级：孤儿 parentId 净化（父分组不存在 / 父分组跨产品） */
+    st.products.push(mk24({ id: 'c24q', name: 'C24项目B' }));
+    st.milestones.push(
+      { id: 'c24g', productId: 'c24p', name: 'C24分组', kind: 'group', parentId: '', date: '', status: '未开始', desc: '', color: '#165DFF', endDate: '' },
+      { id: 'c24orph', productId: 'c24p', name: 'C24孤儿', parentId: 'c24ghost', date: T, status: '未开始', desc: '', color: '#165DFF' },
+      { id: 'c24cross', productId: 'c24q', name: 'C24跨产品', parentId: 'c24g', date: T, status: '未开始', desc: '', color: '#165DFF' });
+    sandbox.recomputeDerived();
+    check('C24 行为：父分组不存在 → 子项上移顶层', st.milestones.find(m => m.id === 'c24orph').parentId === '');
+    check('C24 行为：父分组跨产品 → 子项上移顶层', st.milestones.find(m => m.id === 'c24cross').parentId === '');
+    check('C24 行为：正常归属分组保留', st.milestones.find(m => m.id === 'c24g').kind === 'group' && st.milestones.filter(m => m.parentId === 'c24g').length === 0);
+
+    /* 4) 清理压测数据 */
+    st.products = st.products.filter(p => ['c24p', 'c24q'].indexOf(p.id) < 0);
+    st.orders = st.orders.filter(o => ['c24done', 'c24over'].indexOf(o.id) < 0);
+    st.milestones = st.milestones.filter(m => ['c24g', 'c24orph', 'c24cross'].indexOf(m.id) < 0);
+    sandbox.go('dashboard');
+  } catch (e) { check('C24 批次', false, e.message + ' | ' + String(e.stack).split('\n')[1]); }
+  pendingAsync--;
+})();
+
+
+/* ===== C25 批次：项目详情甘特图（WBS 任务树 + 时间条形区，参考图形态） ===== */
+pendingAsync++;
+(async function () {
+  try {
+    for (let w = 0; w < 600 && pendingAsync > 1; w++) await new Promise(r => setTimeout(r, 10));
+    const st = sandbox.state, T = sandbox.todayStr();
+    /* 1) 源码级：tab 注册 + 关键结构 */
+    check('C25 甘特 tab 注册在概览之后', /tabs=\['概览','甘特','打样'/.test(html) && html.indexOf("detailTab==='甘特'") > 0);
+    check('C25 projGanttHTML 结构：吸附左列+吸顶表头+今日线+周末条纹', html.indexOf('function projGanttHTML(pid)') > 0 && html.indexOf('position:sticky;left:0;z-index:2') > 0 && html.indexOf('position:sticky;top:0;z-index:3') > 0 && html.indexOf("title=\"今天\"") > 0 && html.indexOf('repeating-linear-gradient(90deg,transparent 0,transparent') > 0);
+    check('C25 汇总条走主题变量（var(--ink)）且分组条不可点', html.indexOf('background:var(--ink);color:var(--on-accent)') > 0);
+
+    /* 2) 行为级：造数据渲染 */
+    const mk25 = (o) => Object.assign({ id: 'x', name: 'x', cat: '', platform: '', status: '生产中', owner: '', targetPrice: 1, ideaDate: T, sampleDue: '' }, o);
+    st.products.push(mk25({ id: 'c25p', name: 'C25项目', targetDate: sandbox.addDays(T, 40) }));
+    st.milestones.push(
+      { id: 'c25g', productId: 'c25p', name: 'C25阶段', kind: 'group', parentId: '', date: '', status: '未开始', desc: '', color: '#165DFF', endDate: '' },
+      { id: 'c25m1', productId: 'c25p', name: 'C25任务A', parentId: 'c25g', date: sandbox.addDays(T, 1), endDate: sandbox.addDays(T, 6), status: '未开始', desc: '', color: '#165DFF' },
+      { id: 'c25m2', productId: 'c25p', name: 'C25任务B', parentId: 'c25g', date: sandbox.addDays(T, 8), status: '未开始', desc: '', color: '#FF7D00' });
+    st._pid = 'c25p'; sandbox.detailTab = '甘特';
+    sandbox.viewProjectDetail();
+    const gv = sandbox.document.getElementById('view').innerHTML;
+    check('C25 行为：甘特 tab 渲染标题+表头+汇总条（名称·n/m）', gv.indexOf('项目甘特图') > 0 && gv.indexOf('WBS / 任务名称') > 0 && gv.indexOf('C25阶段 · 0/2') > 0, 'sum=' + gv.indexOf('C25阶段 · 0/2'));
+    check('C25 行为：WBS 编码 1/1.1/1.2 进左列', gv.indexOf('flex:none">1.1<') > 0 && gv.indexOf('flex:none">1.2<') > 0 && gv.indexOf('flex:none">1<') > 0);
+    check('C25 行为：工期条+条尾名/菱形+条尾名渲染（C31 拖拽 title 前缀）', gv.indexOf('拖拽平移 · C25任务A ' + sandbox.addDays(T, 1) + ' ~ ' + sandbox.addDays(T, 6)) > 0 && gv.indexOf('拖拽改期 · C25任务B ' + sandbox.addDays(T, 8)) > 0);
+    check('C25 行为：分组条不可拖不可点（msDrill 仅左列+条尾名 ×2 行=4；pgDrag 工期条×3+菱形×1=4）', (gv.match(/msDrill/g) || []).length === 4 && (gv.match(/pgDrag\(event/g) || []).length === 4, 'drill=' + (gv.match(/msDrill/g) || []).length + ' drag=' + (gv.match(/pgDrag\(event/g) || []).length);
+
+    /* 3) 行为级：空状态引导 */
+    st.products.push(mk25({ id: 'c25e', name: 'C25空项目' }));
+    st._pid = 'c25e';
+    sandbox.viewProjectDetail();
+    const ev = sandbox.document.getElementById('view').innerHTML;
+    check('C25 行为：空项目显示引导文案', ev.indexOf('暂无里程碑 / 阶段分组') > 0);
+
+    /* 4) 清理 */
+    st.products = st.products.filter(p => ['c25p', 'c25e'].indexOf(p.id) < 0);
+    st.milestones = st.milestones.filter(m => m.productId !== 'c25p');
+    sandbox.detailTab = '概览';
+    sandbox.go('dashboard');
+  } catch (e) { check('C25 批次', false, e.message + ' | ' + String(e.stack).split('\n')[1]); }
+  pendingAsync--;
+})();
+
+
+/* ===== C26 批次：甘特图三视角审查修正（条纹 7 天周期 / NaN 渲染洞 / 弹窗校验 / todayX 钳制） ===== */
+pendingAsync++;
+(async function () {
+  try {
+    for (let w = 0; w < 600 && pendingAsync > 1; w++) await new Promise(r => setTimeout(r, 10));
+    const st = sandbox.state, T = sandbox.todayStr();
+    /* 1) 源码级 */
+    check('C26 源码：条纹梯度 7 天周期收尾（两个分支末位色标均为 7*DAY_W）', (html.match(/\(7\*DAY_W\)\+'px\)'/g) || []).length === 2, 'cnt=' + (html.match(/\(7\*DAY_W\)\+'px\)'/g) || []).length);
+    check('C26 源码：弹窗日期校验双站点（结构绑定，不绑文案）', html.indexOf("if(!isG&&!fv('f-msdate'))") > 0 && html.indexOf("if(!willG&&!fv('f-msdate'))") > 0);
+    check('C26 源码：todayX 钳制 + 工期条 m.date 守卫 + msState 未排期分支', html.indexOf('Math.min(xOf(todayStr())') > 0 && html.indexOf('if(m.date&&m.endDate&&m.endDate>m.date)') > 0 && html.indexOf("if(!m.date)return{cls:'gray',label:'未排期'") > 0);
+
+    /* 2) 行为级：周六起步——startT=周六时条纹不再全轴涂色（旧 bug 周期=2 天），末位色标=210px=7 天 */
+    const mk26 = (o) => Object.assign({ id: 'x', name: 'x', cat: '', platform: '', status: '生产中', owner: '', targetPrice: 1, ideaDate: '', sampleDue: '' }, o);
+    const base = sandbox.parseDate(T);
+    const dayOfWeek = (target) => { for (let k = 0; k < 14; k++) { const d = new Date(base.getTime() + k * 86400000); if (d.getDay() === target) return sandbox.addDays(T, k); } return T; };
+    const tue = dayOfWeek(2), wed = dayOfWeek(3);
+    st.products.push(mk26({ id: 'c26p', name: 'C26项目', ideaDate: tue })); /* lo=tue-3=周六起步 */
+    st.milestones.push({ id: 'c26m', productId: 'c26p', name: 'C26任务', parentId: '', date: tue, status: '未开始', desc: '', color: '#165DFF', endDate: '' });
+    let g26 = sandbox.projGanttHTML('c26p');
+    check('C26 行为：周六起步条纹含 7 天周期收尾（60,210px 段）', g26.indexOf('var(--soft) 60px,transparent 60px,transparent 210px') > 0, 'idx=' + g26.indexOf('transparent 60px,transparent 210px'));
+    st.products.pop(); st.milestones.pop();
+    st.products.push(mk26({ id: 'c26p2', name: 'C26项目B', ideaDate: wed })); /* lo=wed-3=周日起步 */
+    st.milestones.push({ id: 'c26m2', productId: 'c26p2', name: 'C26任务B', parentId: '', date: wed, status: '未开始', desc: '', color: '#165DFF', endDate: '' });
+    g26 = sandbox.projGanttHTML('c26p2');
+    check('C26 行为：周日起步双段条纹（[0,30) 周日 + [180,210) 周六）', g26.indexOf('var(--soft) 0,var(--soft) 30px,transparent 30px,transparent 180px') > 0, 'idx=' + g26.indexOf('var(--soft) 0,var(--soft) 30px'));
+    st.products.pop(); st.milestones.pop();
+
+    /* 3) 行为级：无日期里程碑——msState 未排期 + 甘特渲染零 NaN（含 endDate 有值但 date 空的洞组合） */
+    check('C26 行为：msState 空日期→未排期（不再「剩 NaN 天」）', sandbox.msState({ date: '', status: '未开始' }).label === '未排期' && sandbox.msState({ date: '', status: '已完成' }).label === '已完成');
+    st.products.push(mk26({ id: 'c26p3', name: 'C26项目C', ideaDate: sandbox.addDays(T, 1) }));
+    st.milestones.push({ id: 'c26m3', productId: 'c26p3', name: 'C26任务C', parentId: '', date: '', endDate: sandbox.addDays(T, 10), status: '进行中', desc: '', color: '#165DFF' });
+    g26 = sandbox.projGanttHTML('c26p3');
+    check('C26 行为：date 空+endDate 有值渲染零 NaN', g26.indexOf('NaN') < 0, 'NaNidx=' + g26.indexOf('NaN'));
+
+    /* 4) 行为级：todayX 钳制——项目日期远在过去时今日线不出负值/不溢出 */
+    st.products.push(mk26({ id: 'c26p4', name: 'C26项目D', ideaDate: sandbox.addDays(T, -300) }));
+    st.milestones.push({ id: 'c26m4', productId: 'c26p4', name: 'C26任务D', parentId: '', date: sandbox.addDays(T, -300), status: '已完成', desc: '', color: '#00B42A', endDate: '' });
+    g26 = sandbox.projGanttHTML('c26p4');
+    check('C26 行为：过去项目今日线钳制（无负坐标无 NaN）', g26.indexOf('left:-') < 0 && g26.indexOf('NaN') < 0, 'neg=' + g26.indexOf('left:-'));
+
+    /* 5) 清理 */
+    st.products = st.products.filter(p => p.id.indexOf('c26p') !== 0);
+    st.milestones = st.milestones.filter(m => String(m.id).indexOf('c26m') !== 0);
+    sandbox.go('dashboard');
+  } catch (e) { check('C26 批次', false, e.message + ' | ' + String(e.stack).split('\n')[1]); }
+  pendingAsync--;
+})();
+
+
+/* ===== C27 批次：甘特任务层（kind='task'）+ 项目总时长标注 ===== */
+pendingAsync++;
+(async function () {
+  try {
+    for (let w = 0; w < 600 && pendingAsync > 1; w++) await new Promise(r => setTimeout(r, 10));
+    const st = sandbox.state, T = sandbox.todayStr();
+    /* 1) 源码级：同型站点计数探针 + 项目总条结构 */
+    check('C27 源码：类型三选双站点（option task text==2）', (html.match(/>任务（工期条）</g) || []).length === 2, 'cnt=' + (html.match(/>任务（工期条）</g) || []).length);
+    check('C27 源码：任务必填结束日期校验三站点（弹窗×2+CSV×1）', (html.match(/任务需要结束日期/g) || []).length === 3, 'cnt=' + (html.match(/任务需要结束日期/g) || []).length);
+    check('C27 源码：kind task 赋值三站点（isT/willT/msIsT）', (html.match(/isT\?'task'/g) || []).length + (html.match(/willT\?'task'/g) || []).length + (html.match(/msIsT\?'task'/g) || []).length === 3);
+    check('C27 源码：项目总条（rawLo/rawHi 内容跨度 + 总时长标注）', html.indexOf('var rawLo=lo,rawHi=hi') > 0 && html.indexOf('项目总时长 ') > 0 && html.indexOf('总时长 '+'>') === -1 && html.indexOf("sumHtml='<div") > 0);
+
+    /* 2) 行为级：任务渲染（工期条+任务tag）+ 项目总条 N 天 */
+    const mk27 = (o) => Object.assign({ id: 'x', name: 'x', cat: '', platform: '', status: '生产中', owner: '', targetPrice: 1, ideaDate: '', sampleDue: '' }, o);
+    const d1 = sandbox.addDays(T, 1), d6 = sandbox.addDays(T, 6);
+    st.products.push(mk27({ id: 'c27p', name: 'C27项目', ideaDate: d1 }));
+    st.milestones.push({ id: 'c27t1', productId: 'c27p', name: 'C27开模任务', parentId: '', date: d1, endDate: d6, status: '进行中', desc: '', color: '#165DFF', kind: 'task' });
+    let g27 = sandbox.projGanttHTML('c27p');
+    check('C27 行为：项目总条渲染总时长 6 天（内容跨度含首尾）', g27.indexOf('总时长 6 天') > 0 && g27.indexOf('title="项目总时长 6 天（' + d1 + ' ~ ' + d6 + '）"') > 0, 'idx=' + g27.indexOf('总时长 6 天'));
+    check('C27 行为：任务行工期条+「任务」tag（C31：左列+条尾名 2 处 msDrill，工期条挂 pgDrag×3 双缘缩放）', g27.indexOf('flex:none">任务</span>') > 0 && g27.indexOf('拖拽平移 · C27开模任务 ' + d1 + ' ~ ' + d6) > 0 && (g27.match(/msDrill/g) || []).length === 2 && (g27.match(/pgDrag\(event/g) || []).length === 3, 'drill=' + (g27.match(/msDrill/g) || []).length + ' drag=' + (g27.match(/pgDrag\(event/g) || []).length);
+    check('C27 行为：总条不含 padding 偏移（跨度起于任务开始日非甘特左沿）', g27.indexOf('left:0px;top:8px') < 0, 'neg');
+
+    /* 3) 行为级：任务参与进度（与里程碑同权）——先渲染（进行中）再标已完成重算 */
+    const _c27p = st.products.find(p => p.id === 'c27p');
+    st.milestones.find(m => m.id === 'c27t1').status = '已完成';
+    sandbox.recalcProgress('c27p');
+    check('C27 行为：任务完成计入项目进度（1/1→100%）', _c27p.progress === 100, 'prog=' + _c27p.progress);
+
+    /* 4) 行为级：无日期项目不渲染总条（rawLo=null 兜底；图例字样不算） */
+    st.products.push(mk27({ id: 'c27p2', name: 'C27项目B', ideaDate: '' }));
+    st.milestones.push({ id: 'c27t2', productId: 'c27p2', name: 'C27无日期', parentId: '', date: '', status: '未开始', desc: '', color: '#165DFF', kind: 'task', endDate: '' });
+    g27 = sandbox.projGanttHTML('c27p2');
+    check('C27 行为：全项目无日期→不渲染总条且零 NaN', g27.indexOf('title="项目总时长') < 0 && g27.indexOf('NaN') < 0, 'idx=' + g27.indexOf('title="项目总时长') + ',NaN=' + g27.indexOf('NaN'));
+
+    /* 5) 清理 */
+    st.products = st.products.filter(p => p.id.indexOf('c27p') !== 0);
+    st.milestones = st.milestones.filter(m => String(m.id).indexOf('c27t') !== 0);
+    sandbox.go('dashboard');
+  } catch (e) { check('C27 批次', false, e.message + ' | ' + String(e.stack).split('\n')[1]); }
+  pendingAsync--;
+})();
+
+
+/* ===== C28：本机安装版 + 数据联动（源码级：安装链路结构断言） ===== */
+pendingAsync++;
+(async function () {
+  try {
+    const buildPy = fs.readFileSync(path.join(__dirname, '..', 'build.py'), 'utf8');
+    const appPy = fs.readFileSync(path.join(__dirname, '..', 'app.py'), 'utf8');
+    const iss = fs.readFileSync(path.join(__dirname, '..', 'installer.iss'), 'utf8');
+
+    /* 1) iss 结构断言 */
+    check('C28 源码：iss 版本号强制注入（#ifndef MyAppVersion 即 #error）', iss.includes('#ifndef MyAppVersion') && iss.includes('#error'), 'injection guard missing');
+    check('C28 源码：AppId 固定 GUID（升级识别链稳定）', /AppId=\{\{[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}\}/.test(iss), 'AppId malformed');
+    check('C28 源码：PrivilegesRequired=lowest（免 UAC，装 %LOCALAPPDATA%）', iss.includes('PrivilegesRequired=lowest'), 'priv');
+    check('C28 源码：AppMutex=Local\\SupplyDevLocal（运行中禁止覆盖安装）', iss.includes('AppMutex=Local\\SupplyDevLocal'), 'mutex');
+    check('C28 源码：卸载不删用户数据（无 [UninstallDelete] 节）', iss.indexOf('[UninstallDelete]') < 0, 'uninstall leak');
+    check('C28 源码：安装包产物命名 setup-v{版本}', iss.includes('SupplyDevLocal-setup-v{#MyAppVersion}'), 'naming');
+    check('C28 源码：绿色版 exe 重命名为固定名（快捷方式稳定）', iss.includes('DestName: "{#MyAppExe}.exe"'), 'destname');
+
+    /* 2) build.py 注入链（版本号单一来源 + 预检前置） */
+    check('C28 源码：ISCC 预检在版本号消耗之前（预检失败不白耗版本）', buildPy.indexOf('ISCC') >= 0 && buildPy.indexOf('ISCC') < buildPy.indexOf('patch += 1'), 'order=' + buildPy.indexOf('ISCC') + '/' + buildPy.indexOf('patch += 1'));
+    check('C28 源码：版本号经 /DMyAppVersion 注入 iss（单一来源）', buildPy.includes("/DMyAppVersion=' + new_ver") && buildPy.includes('/DSourceExe='), 'inject missing');
+    check('C28 源码：iss 编译前转 UTF-8 BOM（中文注释防 ANSI 乱码）', buildPy.includes("encoding='utf-8-sig'"), 'bom');
+    check('C28 源码：--no-installer 逃生开关', buildPy.includes("--no-installer' in sys.argv") || buildPy.includes('"--no-installer" in sys.argv'), 'escape hatch');
+
+    /* 3) 数据联动基础：数据目录与安装形态无关 */
+    check('C28 源码：app.py 数据目录固定 ~/.supplydev（绿色版/安装版共用）', appPy.includes("'.supplydev'") && appPy.includes('storage_path=data_dir'), 'data dir');
+    check('C28 源码：单实例互斥 Local\\SupplyDevLocal（联动不退化为并发写）', appPy.includes("'Local\\\\SupplyDevLocal'"), 'mutex');
+  } catch (e) { check('C28 批次', false, e.message + ' | ' + String(e.stack).split('\n')[1]); }
+  pendingAsync--;
+})();
+
+
+/* ===== C29：实时联动守卫 + 日志成熟化增量 ===== */
+pendingAsync++;
+(async function () {
+  try {
+    /* 1) 源码级：六站点守卫计数 + 死引用清除 + 日志增量存在 */
+    check('C29 源码：ROUTE 守卫六站点（renderCost×1+renderCostTab×4+delBOM×1）', (html.match(/if\(ROUTE==='cost'\)renderCostTab\(\);else RENDER\(\);/g) || []).length + (html.match(/if\(ROUTE==='cost'\)renderCost\(pid\);else RENDER\(\);/g) || []).length + (html.match(/if\(b&&ROUTE==='cost'\)renderCost\(b\.productId\);else RENDER\(\);/g) || []).length === 6, 'cnt=' + (html.match(/ROUTE==='cost'/g) || []).length);
+    check('C29 源码：_costPid 死引用清除', html.indexOf('state._costPid') < 0, 'dead ref remains');
+    check('C29 源码：资源加载失败捕获（capture 阶段 true 第三参）', html.indexOf('资源加载失败：') > 0 && /\}\s*,\s*true\);/.test(html), 'capture missing');
+    check('C29 源码：console.error 桥接（_inLogConsole 防递归标志 ≥3 处）', (html.match(/_inLogConsole/g) || []).length >= 3, 'bridge cnt=' + (html.match(/_inLogConsole/g) || []).length);
+    check('C29 源码：登出打点', html.indexOf('用户登出：') > 0, 'logout missing');
+    check('C29 源码：window 级 error 监听器过滤资源事件（防双记录）', /addEventListener\('error',function\(ev\)\{\s*if\(ev&&ev\.target&&ev\.target!==window\)return;/.test(html), 'no filter');
+    check('C29 源码：openBOM 保存尾带 ROUTE 守卫', /已新增BOM项，成本快照已更新'\);\s*\/\* C29[\s\S]*?if\(ROUTE==='cost'\)renderCost\(pid\);else RENDER\(\);/.test(html), 'openBOM tail');
+
+    /* 2) 行为级：delBOM 详情路由 → RENDER 全局重渲染（修复前 renderCost 分支在此为 null.innerHTML 抛错/静默失效） */
+    const st = sandbox.state;
+    const mk29 = (o) => Object.assign({ id: 'x', name: 'x', cat: '', platform: '', status: '生产中', owner: '', targetPrice: 1, margin: 0.4, freight: 0, tariff: 0, commission: 0.1, adRate: 0, returnRate: 0, ideaDate: sandbox.todayStr(), sampleDue: '', progress: 0 }, o);
+    st.products.push(mk29({ id: 'c29p', name: 'C29项目' }));
+    st.bom.push({ id: 'c29b1', productId: 'c29p', name: 'C29BOM甲', materialId: null, processId: null, qty: 1, lossRate: 0, childProductId: null });
+    st.bom.push({ id: 'c29b2', productId: 'c29p', name: 'C29BOM乙', materialId: null, processId: null, qty: 2, lossRate: 0, childProductId: null });
+    st._pid = 'c29p'; sandbox.detailTab = '成本'; sandbox.ROUTE = 'project'; sandbox.RENDER();
+    let v29 = docStub.querySelector('#view').innerHTML;
+    check('C29 行为：详情成本 tab 渲染两条 BOM（前置）', v29.indexOf('C29BOM甲') >= 0 && v29.indexOf('C29BOM乙') >= 0, 'pre-render');
+    sandbox.delBOM('c29b1');
+    v29 = docStub.querySelector('#view').innerHTML;
+    check('C29 行为：详情路由删 BOM → 界面实时更新（RENDER 兜底，BOM 甲消失乙保留）', v29.indexOf('C29BOM甲') < 0 && v29.indexOf('C29BOM乙') >= 0, 'stale view');
+
+    /* 3) 行为级：delBOM 成本路由 → renderCost 局部刷新（不整页重渲染） */
+    sandbox.ROUTE = 'cost';
+    sandbox.delBOM('c29b2');
+    const cd29 = docStub.querySelector('#cost-detail').innerHTML;
+    check('C29 行为：成本路由删 BOM → #cost-detail 局部刷新（renderCost 输出且已删项不在）', cd29.indexOf('BOM 拆解') >= 0 && cd29.indexOf('C29BOM乙') < 0, 'partial render len=' + cd29.length);
+
+    /* 4) 行为级：console.error 桥接进运行日志（防递归标志生效） */
+    const logN29 = sandbox.LOGS.length;
+    console.error('C29桥接测试错误消息', new Error('C29桥接Err堆栈锚'));
+    const bridged = sandbox.LOGS.slice().reverse().find(e => e.m === 'console');
+    check('C29 行为：console.error 桥接进日志（含消息与堆栈）', sandbox.LOGS.length === logN29 + 1 && bridged && bridged.g.indexOf('C29桥接测试错误消息') >= 0 && bridged.g.indexOf('C29桥接Err堆栈锚') >= 0, 'bridged=' + (bridged && bridged.g || '').slice(0, 40));
+
+    /* 5) 清理 */
+    st.products = st.products.filter(p => p.id !== 'c29p');
+    st.bom = st.bom.filter(b => String(b.id).indexOf('c29b') !== 0);
+    st._pid = ''; sandbox.ROUTE = 'dashboard'; sandbox.RENDER();
+  } catch (e) { check('C29 批次', false, e.message + ' | ' + String(e.stack).split('\n')[1]); }
+  pendingAsync--;
+})();
+
+
+  /* ================= C30：甘特实时联动（折叠展开 + 滚动位置恢复） ================= */
+  (async () => {
+    pendingAsync++;
+    try {
+      /* C23 教训：等前置异步批次（C6 导出链路等）排干再动 modal-ok，防覆写串扰 */
+      for (let w = 0; w < 600 && pendingAsync > 1; w++) await new Promise(r => setTimeout(r, 10));
+      const html30 = html;
+      /* 1) 源码级：wbsUnfold 定义+3 调用站、滚动记忆链路完整 */
+      check('C30 源码：wbsUnfold 定义+3 调用站（openMilestone/editMilestone/CSV）', (html30.match(/wbsUnfold\(/g) || []).length === 4, 'cnt=' + (html30.match(/wbsUnfold\(/g) || []).length);
+      check('C30 源码：甘特容器挂 pg-scroll + onscroll 记忆', html30.indexOf('id="pg-scroll"') > 0 && html30.indexOf('onscroll="pgScroll=this.scrollLeft"') > 0, 'container missing');
+      check('C30 源码：RENDER 渲染后恢复 pg-scroll 滚动（C33 抽公用 restorePgScroll）', /function restorePgScroll\(\)\{var _pg=document\.getElementById\('pg-scroll'\);if\(_pg&&pgScroll>0\)_pg\.scrollLeft=pgScroll\}/.test(html30) && (html30.match(/restorePgScroll\(\)/g) || []).length >= 2, 'restore missing cnt=' + (html30.match(/restorePgScroll\(\)/g) || []).length);
+      check('C30 源码：goProjectDetail 切换项目重置滚动记忆', html30.indexOf("pgScroll=0;go('project')") > 0, 'reset missing');
+
+      /* 2) 行为级：wbsUnfold 单元（折叠→展开返回 true；空/未折叠 no-op） */
+      sandbox.wbsFold['c30g0'] = true;
+      check('C30 行为：wbsUnfold 展开折叠分组', sandbox.wbsUnfold('c30g0') === true && !sandbox.wbsFold['c30g0'], 'unfold fail');
+      check('C30 行为：wbsUnfold 空参/未折叠 no-op', sandbox.wbsUnfold('') === false && sandbox.wbsUnfold('c30g0') === false, 'noop fail');
+
+      /* 3) 行为级：端到端——往折叠分组新增里程碑（真实 openMilestone 保存路径）→ 展开且甘特立即显示 */
+      const st30 = sandbox.state;
+      st30.products.push({ id: 'c30p', name: 'C30项目', cat: '其他', platform: '', status: '生产中', owner: '', targetPrice: 1, margin: 0.4, freight: 0, tariff: 0, commission: 0.1, adRate: 0, returnRate: 0, ideaDate: sandbox.todayStr(), sampleDue: '', progress: 0 });
+      st30.milestones.push({ id: 'c30g', productId: 'c30p', name: 'C30阶段', parentId: '', date: sandbox.todayStr(), status: '未开始', desc: '', color: '#165DFF', kind: 'group', endDate: '' });
+      sandbox.wbsFold['c30g'] = true;
+      st30._pid = 'c30p'; sandbox.detailTab = '甘特'; sandbox.ROUTE = 'project'; sandbox.RENDER();
+      let v30 = docStub.querySelector('#view').innerHTML;
+      check('C30 前置：甘特 tab 渲染且分组处于折叠态', v30.indexOf('C30阶段') >= 0 && sandbox.wbsFold['c30g'] === true, 'pre-render');
+
+      sandbox.openMilestone('c30p');
+      const setV = (sel, val) => { const el = docStub.querySelector(sel); el.value = val; };
+      setV('#f-msp', 'c30p'); setV('#f-mstype', 'ms'); setV('#f-msname', 'C30任务');
+      setV('#f-msdate', sandbox.todayStr()); setV('#f-msend', sandbox.addDays(sandbox.todayStr(), 3));
+      setV('#f-msgroup', 'c30g'); setV('#f-msstatus', '未开始'); setV('#f-msdesc', ''); setV('#f-mscolor', '#165DFF');
+      docStub.querySelector('#modal-ok').onclick();
+      v30 = docStub.querySelector('#view').innerHTML;
+      check('C30 行为：保存后分组自动展开（wbsFold 清除）', !sandbox.wbsFold['c30g'], 'still folded');
+      check('C30 行为：保存后甘特立即显示新任务（RENDER 实时联动）', v30.indexOf('C30任务') >= 0, 'gantt stale');
+
+      /* 4) 行为级：RENDER 后恢复甘特横向滚动位置 */
+      sandbox.pgScroll = 400;
+      const pg = docStub.querySelector('#pg-scroll'); pg.scrollLeft = 0;
+      sandbox.RENDER();
+      check('C30 行为：RENDER 后甘特横向滚动位置恢复（不跳回开头）', docStub.querySelector('#pg-scroll').scrollLeft === 400, 'scrollLeft=' + docStub.querySelector('#pg-scroll').scrollLeft);
+
+      /* 5) 清理 */
+      st30.products = st30.products.filter(p => p.id !== 'c30p');
+      st30.milestones = st30.milestones.filter(m => String(m.id).indexOf('c30') !== 0);
+      delete sandbox.wbsFold['c30g']; delete sandbox.wbsFold['c30g0']; sandbox.pgScroll = 0;
+      st30._pid = ''; sandbox.detailTab = '概览'; sandbox.ROUTE = 'dashboard'; sandbox.RENDER();
+    } catch (e) { check('C30 批次', false, e.message + ' | ' + String(e.stack).split('\n')[1]); }
+    pendingAsync--;
+  })();
+
+
+  /* ================= C31：甘特自由拖放（拖拽内核 pgDragCommit 数据闭环） ================= */
+  (async () => {
+    pendingAsync++;
+    try {
+      for (let w = 0; w < 600 && pendingAsync > 1; w++) await new Promise(r => setTimeout(r, 10));
+      const html31 = html;
+      /* 1) 源码级：内核函数齐备 + 同源日宽 + 守卫与落盘链 */
+      check('C31 源码：拖拽内核五函数齐备（pgDrag/Move/Up/Commit/TipShow）', ['function pgDrag(', 'function pgDragMove(', 'function pgDragUp(', 'function pgDragCommit(', 'function pgTipShow('].every(s => html31.indexOf(s) > 0), 'kernel missing');
+      check('C31 源码：日宽同源 PG_DAY_W（projGanttHTML DAY_W=PG_DAY_W，拖拽换算同源）', html31.indexOf('DAY_W=PG_DAY_W') > 0 && (html31.match(/PG_DAY_W/g) || []).length >= 5, 'cnt=' + (html31.match(/PG_DAY_W/g) || []).length);
+      check('C31 源码：分组派生条守卫（pgDrag+pgDragCommit 双站点 msIsGroup return）', /function pgDrag\([\s\S]{0,200}msIsGroup\(m\)\)return;/.test(html31) && /function pgDragCommit\([\s\S]{0,200}msIsGroup\(m\)\)return false;/.test(html31), 'group guard');
+      const cm = html31.indexOf('function pgDragCommit(');
+      check('C31 源码：落盘链序 logAudit→recalcProgress→persist（C11/C13 红线）', cm > 0 && html31.indexOf('logAudit(\'甘特拖拽：', cm) > 0 && html31.indexOf("recalcProgress(m.productId)", cm) > 0 && html31.indexOf('persist()', cm) > 0 && html31.indexOf("recalcProgress(m.productId)", cm) < html31.indexOf('persist()', cm), 'chain order');
+      check('C31 源码：工期条不变量钳制（左缘 addDays(m.endDate,-1) / 右缘 addDays(m.date,1)）', html31.indexOf('nd=addDays(m.endDate,-1)') > 0 && html31.indexOf('ne=addDays(m.date,1)') > 0, 'clamp missing');
+      check('C31 源码：move 整体平移 endDate 同步（保持工期）', html31.indexOf('if(m.endDate)m.endDate=addDays(m.endDate,days);') > 0, 'shift missing');
+      check('C31 源码：阈值点击下钻（pgDragUp !st.moved → msDrill）', /function pgDragUp\([\s\S]{0,400}!st\.moved\)\{msDrill\(st\.id\);return\}/.test(html31), 'click path');
+      check('C31 源码：监听器成对增删（mousemove/mouseup 同引用 add+remove）', html31.indexOf("document.addEventListener('mousemove',pgDragMove);") > 0 && html31.indexOf("document.addEventListener('mouseup',pgDragUp);") > 0 && html31.indexOf("document.removeEventListener('mousemove',pgDragMove);") > 0 && html31.indexOf("document.removeEventListener('mouseup',pgDragUp);") > 0, 'listener leak');
+      check('C31 源码：双缘缩放手柄（ew-resize left+right）+ 拖拽中光标样式', (html31.match(/cursor:ew-resize/g) || []).length >= 2 && html31.indexOf('body.pg-dragging') > 0 && html31.indexOf('#pg-drag-tip{') > 0, 'handles/css');
+
+      /* 2) 行为级：pgDragCommit 数据闭环（拖拽落盘=日期回写+进度联动+审计） */
+      const st31 = sandbox.state, T31 = sandbox.todayStr();
+      st31.products.push({ id: 'c31p', name: 'C31项目', cat: '其他', platform: '', status: '生产中', owner: '', targetPrice: 1, margin: 0.4, freight: 0, tariff: 0, commission: 0.1, adRate: 0, returnRate: 0, ideaDate: T31, sampleDue: '', progress: 99 });
+      st31.milestones.push(
+        { id: 'c31t1', productId: 'c31p', name: 'C31任务甲', parentId: '', date: sandbox.addDays(T31, 1), endDate: sandbox.addDays(T31, 4), status: '已完成', desc: '', color: '#165DFF', kind: 'task' },
+        { id: 'c31t2', productId: 'c31p', name: 'C31任务乙', parentId: '', date: sandbox.addDays(T31, 2), endDate: sandbox.addDays(T31, 6), status: '未开始', desc: '', color: '#FF7D00', kind: 'task' },
+        { id: 'c31m1', productId: 'c31p', name: 'C31节点', parentId: '', date: sandbox.addDays(T31, 8), status: '未开始', desc: '', color: '#00B42A', kind: '' },
+        { id: 'c31grp', productId: 'c31p', name: 'C31阶段', parentId: '', date: sandbox.addDays(T31, 1), status: '未开始', desc: '', color: '#86909C', kind: 'group', endDate: '' });
+
+      /* 2a) move：整体平移 +3 天（甲乙同步验证甲），progress 99→50（recalcProgress 落盘点生效） */
+      const t1a = by31(sandbox, 'c31t1');
+      const okMove = sandbox.pgDragCommit('c31t1', 'move', 3);
+      check('C31 行为：move+3 平移（date/endDate 同步 +3）', okMove === true && t1a.date === sandbox.addDays(T31, 4) && t1a.endDate === sandbox.addDays(T31, 7), JSON.stringify({ d: t1a.date, e: t1a.endDate }));
+      const _p31 = st31.products.find(p => p.id === 'c31p');
+      check('C31 行为：拖拽联动项目进度（陈旧 99% → 里程碑 1/3 重算 33%，任务与节点同权）', _p31.progress === 33, 'prog=' + _p31.progress);
+      const dragAudit = (st31._audit || []).slice(-4).find(a => a.a.indexOf('甘特拖拽：C31任务甲') === 0); /* 拖拽审计后紧跟进度联动审计，取近 4 条内匹配 */
+      check('C31 行为：拖拽审计留痕（甘特拖拽：C31任务甲 日期区间）', dragAudit && dragAudit.a.indexOf(sandbox.addDays(T31, 4)) > 0 && dragAudit.a.indexOf(sandbox.addDays(T31, 7)) > 0, dragAudit && dragAudit.a);
+
+      /* 2b) 左缘钳制：+10 天会越过右缘 → 钳到 endDate-1 */
+      const t2 = by31(sandbox, 'c31t2');
+      sandbox.pgDragCommit('c31t2', 'left', 10);
+      check('C31 行为：左缘越界钳制（开始日=结束日-1，不破坏 date<endDate）', t2.date === sandbox.addDays(sandbox.addDays(T31, 6), -1), 'd=' + t2.date);
+
+      /* 2c) 右缘钳制：-10 天会压到左缘 → 钳到 date+1 */
+      const t2b = by31(sandbox, 'c31t2');
+      sandbox.pgDragCommit('c31t2', 'right', -10);
+      check('C31 行为：右缘越界钳制（结束日=开始日+1）', t2b.endDate === sandbox.addDays(t2b.date, 1), 'e=' + t2b.endDate);
+
+      /* 2d) 里程碑菱形（无 endDate）move：仅 date 平移 */
+      const m1 = by31(sandbox, 'c31m1');
+      sandbox.pgDragCommit('c31m1', 'move', -2);
+      check('C31 行为：里程碑菱形拖拽改期（date-2，endDate 保持空）', m1.date === sandbox.addDays(T31, 6) && !m1.endDate, 'd=' + m1.date);
+
+      /* 2e) 拒绝路径：分组（派生条）/0 位移/未知模式 → false 且数据零改动 */
+      const g31 = by31(sandbox, 'c31grp');
+      const gDate = g31.date;
+      check('C31 行为：分组汇总条禁止拖拽（commit 返回 false 数据不变）', sandbox.pgDragCommit('c31grp', 'move', 5) === false && g31.date === gDate, 'group mutated');
+      check('C31 行为：0 位移/未知模式拒绝（无审计无落盘）', sandbox.pgDragCommit('c31t1', 'move', 0) === false && sandbox.pgDragCommit('c31t1', 'zoom', 3) === false, 'reject fail');
+
+      /* 3) 清理 */
+      st31.products = st31.products.filter(p => p.id !== 'c31p');
+      st31.milestones = st31.milestones.filter(m => String(m.id).indexOf('c31') !== 0);
+    } catch (e) { check('C31 批次', false, e.message + ' | ' + String(e.stack).split('\n')[1]); }
+    pendingAsync--;
+  })();
+
+
+  /* ================= C32：甘特自由新增三类条目（preset 预设类型 + 实时上甘特） ================= */
+  (async () => {
+    pendingAsync++;
+    try {
+      for (let w = 0; w < 600 && pendingAsync > 1; w++) await new Promise(r => setTimeout(r, 10));
+      const html32 = html;
+      /* 1) 源码级：preset 参数 + 三入口 + 空态引导（甘特头部与空态共用同一 onclick 串 → 每类计数==2） */
+      check('C32 源码：openMilestone 带 presetT 参数（非法值回落 task）', /function openMilestone\(pid,presetT\)\{/.test(html32) && html32.indexOf("var pt=(presetT==='ms'||presetT==='group')?presetT:'task'") > 0, 'preset missing');
+      check('C32 源码：三类直达入口（task==2 头部+空态 / ms==4 头部+空态+下钻弹窗+概览tab（C33 修正预选）/ group==2）', ["task", "ms", "group"].every(t => html32.split("openMilestone(\\''+pid+'\\',\\'" + t + "\\')").length - 1 === (t === 'ms' ? 4 : 2)), 'btn cnt=' + ['task', 'ms', 'group'].map(t => html32.split("openMilestone(\\''+pid+'\\',\\'" + t + "\\')").length - 1).join('/'));
+      check('C32 源码：类型选项 selected 预设（openMilestone 内 pt 三分支）', ["task", "ms", "group"].every(t => (html32.match(new RegExp("\\(pt==='" + t + "'\\?' selected':''\\)\\+", 'g')) || []).length === 1), 'sel cnt=' + ['task', 'ms', 'group'].map(t => (html32.match(new RegExp("\\(pt==='" + t + "'\\?' selected':''\\)\\+", 'g')) || []).length).join('/'));
+      check('C32 源码：空态引导改直达按钮（不再指向概览 tab）', html32.indexOf('到「概览」tab 点「+ 里程碑」') < 0 && html32.indexOf('新增后立即上甘特图') > 0, 'empty state');
+      check('C32 源码：关联项目下拉默认选中当前项目（popts selected=pid，防详情页新增存错项目）', html32.indexOf('p.id===pid?\' selected\':\'\'') > 0, 'popts selected missing');
+
+      /* 2) 行为级：真实弹窗保存路径——甘特 tab 点「+ 阶段分组」→ 分组行实时上甘特
+         stub 限制：select 不反映 selected 属性到 .value（C30 教训），setV('#f-mstype',…) 模拟用户确认预选值 */
+      const st32 = sandbox.state, T32 = sandbox.todayStr();
+      st32.products.push({ id: 'c32p', name: 'C32项目', cat: '门', platform: '', status: '生产中', owner: '', targetPrice: 1, margin: 0.4, freight: 0, tariff: 0, commission: 0.1, adRate: 0, returnRate: 0, ideaDate: T32, sampleDue: '', progress: 0, targetDate: sandbox.addDays(T32, 40) });
+      st32._pid = 'c32p'; sandbox.detailTab = '甘特'; sandbox.ROUTE = 'project'; sandbox.RENDER();
+      let v32 = docStub.querySelector('#view').innerHTML;
+      check('C32 前置：空项目甘特渲染直达按钮（头部 3 + 空态 3 = 6）', v32.indexOf('暂无里程碑 / 阶段分组') > 0 && (v32.match(/openMilestone\('c32p','(task|ms|group)'\)/g) || []).length === 6, 'empty btn=' + (v32.match(/openMilestone\('c32p','(task|ms|group)'\)/g) || []).length);
+
+      /* 2a) + 阶段分组：preset 预设 group → 保存 → 分组行实时出现 */
+      sandbox.openMilestone('c32p', 'group');
+      check('C32 行为：preset group 预设类型', sandbox.openMilestone._pt === 'group', 'preset=' + sandbox.openMilestone._pt);
+      const sv32 = (sel, val) => { docStub.querySelector(sel).value = val; };
+      sv32('#f-msp', 'c32p'); sv32('#f-mstype', 'group'); sv32('#f-msname', 'C32注塑阶段'); sv32('#f-msdate', ''); sv32('#f-msend', ''); sv32('#f-msgroup', ''); /* 归属阶段显式清空：elCache 跨批次残留（C30 曾设 c30g）会让保存走「归属阶段无效」静默中止——真实报错实证 */
+      docStub.querySelector('#modal-ok').onclick();
+      v32 = docStub.querySelector('#view').innerHTML;
+      check('C32 行为：保存后阶段分组行实时上甘特（persist+RENDER）', v32.indexOf('C32注塑阶段') >= 0 && v32.indexOf('阶段汇总') >= 0, 'group stale');
+
+      /* 2b) + 任务：preset 预设 task → 保存 → 工期条立即出现且计入进度 */
+      sandbox.openMilestone('c32p', 'task');
+      check('C32 行为：preset task 预设类型', sandbox.openMilestone._pt === 'task', 'preset=' + sandbox.openMilestone._pt);
+      sv32('#f-msp', 'c32p'); sv32('#f-mstype', 'task'); sv32('#f-msname', 'C32开模任务'); sv32('#f-msdate', T32); sv32('#f-msend', sandbox.addDays(T32, 5)); sv32('#f-msstatus', '已完成'); sv32('#f-msgroup', ''); sv32('#f-msdesc', ''); sv32('#f-mscolor', '#165DFF');
+      docStub.querySelector('#modal-ok').onclick();
+      v32 = docStub.querySelector('#view').innerHTML;
+      const _p32 = st32.products.find(p => p.id === 'c32p');
+      check('C32 行为：保存后任务工期条实时上甘特（手柄×3 + 交付基线菱形×1=4，targetDate 触发基线自动同步）', v32.indexOf('C32开模任务') >= 0 && (v32.match(/pgDrag\(event/g) || []).length === 4, 'task stale drag=' + (v32.match(/pgDrag\(event/g) || []).length);
+      check('C32 行为：已完成任务实时联动项目进度（任务+交付基线 1/2→50%，基线同步为产品固有语义）', _p32.progress === 50, 'prog=' + _p32.progress);
+
+      /* 2c) 非法 preset 回落 task */
+      sandbox.openMilestone('c32p', 'bogus');
+      check('C32 行为：非法 preset 回落 task', sandbox.openMilestone._pt === 'task', 'fallback fail');
+      sandbox.closeModal(); /* 关闭弹窗不保存 */
+
+      /* 3) 清理 */
+      st32.products = st32.products.filter(p => p.id !== 'c32p');
+      st32.milestones = st32.milestones.filter(m => String(m.id).indexOf('c32') !== 0);
+      st32._pid = ''; sandbox.detailTab = '概览'; sandbox.ROUTE = 'dashboard'; sandbox.RENDER();
+    } catch (e) { check('C32 批次', false, e.message + ' | ' + String(e.stack).split('\n')[1]); }
+    pendingAsync--;
+  })();
+
+  /* ===== C33：甘特+项目详情联动对抗性审查修复（v1.0.64）===== */
+  pendingAsync++;
+  (async () => {
+    await new Promise(r => setTimeout(r, 0));
+    try {
+      const html33 = html;
+      /* 1) 源码级 */
+      check('C33 源码：概览 tab「+ 里程碑」带 ms 预设（C32 漏改站；总量 4 站点由 C32 断言覆盖）', html33.split("openMilestone(\\''+pid+'\\',\\'ms\\')").length - 1 === 4 && html33.indexOf('导入</button><button class="btn sm" onclick="openMilestone(\\\'\'+pid+\'\\\',\\\'ms\\\'') > 0, 'msall=' + (html33.split("openMilestone(\\''+pid+'\\',\\'ms\\')").length - 1) + ' overview=' + (html33.indexOf('导入</button><button class="btn sm" onclick="openMilestone(\\\'\'+pid+\'\\\',\\\'ms\\\'') > 0));
+      check('C33 源码：ensureDeps 清除端点为分组的依赖（转换路径残留防线）', html33.indexOf("fm.kind!=='group'&&tm.kind!=='group'") > 0, 'group filter missing');
+      check('C33 源码：editMilestone 转分组显式清理依赖并审计', html33.indexOf('_kindChgG=willG&&!isG') > 0 && html33.indexOf('转为阶段分组，移除') > 0, 'purge missing');
+      check('C33 源码：pgDrag 双缘手柄幽灵作用于父条（el=parentElement + origW）', html33.indexOf("(mode==='move')?ev.currentTarget:ev.currentTarget.parentElement") > 0 && html33.indexOf('origW:parseFloat(bar.style.width)||0') > 0, 'ghost bar missing');
+
+      /* 2) 行为级：pgDragMove 幽灵三模式（left=左移+收缩 / right=扩宽 / move=平移） */
+      const st33 = sandbox.state, T33 = sandbox.todayStr();
+      st33.products.push({ id: 'c33p', name: 'C33项目', cat: '门', platform: '', status: '生产中', owner: '', targetPrice: 1, margin: 0.4, freight: 0, tariff: 0, commission: 0.1, adRate: 0, returnRate: 0, ideaDate: T33, sampleDue: '', progress: 0, targetDate: sandbox.addDays(T33, 40) });
+      st33.milestones.push({ id: 'c33m', productId: 'c33p', name: 'C33任务', date: T33, endDate: sandbox.addDays(T33, 3), status: '未开始', desc: '', color: '#165DFF', kind: 'task', parentId: '' });
+      const bar33 = { style: { left: '60px', width: '120px' } };
+      sandbox.pgDragState = { id: 'c33m', mode: 'left', x0: 100, el: bar33, origLeft: 60, origW: 120, moved: true, days: 2 };
+      sandbox.pgDragMove({ clientX: 160 });
+      check('C33 行为：左缘拖拽幽灵=父条左移+宽度收缩（60+60/120-60）', bar33.style.left === '120px' && bar33.style.width === '60px', 'L=' + bar33.style.left + ' W=' + bar33.style.width);
+      const bar33b = { style: { left: '60px', width: '120px' } };
+      sandbox.pgDragState = { id: 'c33m', mode: 'right', x0: 100, el: bar33b, origLeft: 60, origW: 120, moved: true, days: 2 };
+      sandbox.pgDragMove({ clientX: 160 });
+      check('C33 行为：右缘拖拽幽灵=宽度扩展、左缘不动（60/180）', bar33b.style.left === '60px' && bar33b.style.width === '180px', 'L=' + bar33b.style.left + ' W=' + bar33b.style.width);
+
+      /* 2b) 行为级：task→group 转换清理关联依赖 */
+      st33.milestones.push({ id: 'c33t', productId: 'c33p', name: 'C33待转换', date: T33, endDate: sandbox.addDays(T33, 2), status: '未开始', desc: '', color: '#722ED1', kind: 'task', parentId: '' });
+      st33.deps = [{ id: 'dp33', from: 'c33t', to: 'c33m', type: 'FS' }];
+      sandbox.editMilestone('c33t');
+      const sv33 = (sel, val) => { docStub.querySelector(sel).value = val; };
+      sv33('#f-msname', 'C33阶段'); sv33('#f-mstype', 'group'); sv33('#f-msdate', ''); sv33('#f-msend', ''); sv33('#f-msgroup', ''); sv33('#f-msdesc', '');
+      docStub.querySelector('#modal-ok').onclick();
+      const _t33 = st33.milestones.find(m => m.id === 'c33t');
+      check('C33 行为：任务转阶段分组成功且关联依赖被清理（dp33 不复存；recompute 会再生基线链依赖，禁按总数断言）', _t33 && _t33.kind === 'group' && st33.deps.every(d => d.from !== 'c33t' && d.to !== 'c33t'), 'kind=' + (_t33 && _t33.kind) + ' stale=' + st33.deps.filter(d => d.from === 'c33t' || d.to === 'c33t').length);
+      check('C33 行为：依赖清理留痕审计', (st33._audit || []).some(a => a.a.indexOf('依赖清理') === 0 && a.a.indexOf('C33阶段') > 0), JSON.stringify((st33._audit || []).slice(-2)));
+
+      /* 2c) 行为级：tab 直切甘特恢复横向滚动位 + goProjectDetail 重置 */
+      sandbox.pgScroll = 520; sandbox.state._pid = 'c33p'; sandbox.detailTab = '甘特'; sandbox.viewProjectDetail();
+      const _pg33 = docStub.querySelector('#pg-scroll');
+      check('C33 行为：tab 直切甘特恢复滚动位 520', _pg33 && _pg33.scrollLeft === 520, 'sl=' + (_pg33 && _pg33.scrollLeft));
+      sandbox.goProjectDetail('c33p');
+      check('C33 行为：goProjectDetail 重置滚动记忆为 0', sandbox.pgScroll === 0, 'ps=' + sandbox.pgScroll);
+      sandbox.pgScroll = 0;
+
+      /* 3) 清理 */
+      st33.products = st33.products.filter(p => p.id !== 'c33p');
+      st33.milestones = st33.milestones.filter(m => m.productId !== 'c33p');
+      st33.deps = [];
+    } catch (e) { check('C33 批次', false, e.message + ' | ' + String(e.stack).split('\n')[1]); }
+    pendingAsync--;
+  })();
+
+  /* ===== C34 批次：Esc 取消拖拽 + 提示钳制同口径（审查产物：主链路无 P0/P1，2 项 P3 升级修复） ===== */
+  (async () => {
+    pendingAsync++;
+    await new Promise(r => setTimeout(r, 0));
+    try {
+      const html34 = html;
+      /* 1) 源码级 */
+      check('C34 源码：pgDrag 挂 Esc 取消监听 + pgDragCancel 函数存在', html34.indexOf("document.addEventListener('keydown',pgDragCancel)") > 0 && /function pgDragCancel\(ev\)\{/.test(html34) && html34.indexOf("ev.key!=='Escape'") > 0, 'esc handler missing');
+      check('C34 源码：Esc 还原幽灵条（left/width 回写 origLeft/origW）', /st\.el\.style\.left=st\.origLeft\+'px';if\(st\.origW\)st\.el\.style\.width=st\.origW\+'px'/.test(html34), 'restore missing');
+      check('C34 源码：pgDragUp/Cancel 双站点摘监听（mousemove+mouseup+keydown 各 2 处 removeEventListener）', (html34.match(/document\.removeEventListener\('mousemove',pgDragMove\)/g) || []).length === 2 && (html34.match(/document\.removeEventListener\('keydown',pgDragCancel\)/g) || []).length === 2, 'rm cnt=' + (html34.match(/document\.removeEventListener\('keydown',pgDragCancel\)/g) || []).length);
+      check('C34 源码：提示钳制同口径（左缘 >=endDate 钳 endDate-1 / 右缘 <=date 钳 date+1，带「（钳制）」标注）', /_nd>=m\.endDate\)\{_nd=addDays\(m\.endDate,-1\);_re='（钳制）'\}/.test(html34) && /_ne<=m\.date\)\{_ne=addDays\(m\.date,1\);_re='（钳制）'\}/.test(html34), 'tip clamp missing');
+
+      /* 2) 行为级：pgDrag → mousemove 越阈值 → Esc → 数据零变化 + 监听摘除 */
+      const st34 = sandbox.state, T34 = sandbox.todayStr();
+      st34.products.push({ id: 'c34p', name: 'C34项目', cat: '门', platform: '', status: '生产中', owner: '', targetPrice: 1, margin: 0.4, freight: 0, tariff: 0, commission: 0.1, adRate: 0, returnRate: 0, ideaDate: T34, sampleDue: '', progress: 0, targetDate: sandbox.addDays(T34, 40) });
+      st34.milestones.push({ id: 'c34t', productId: 'c34p', name: 'C34任务', parentId: '', date: sandbox.addDays(T34, 2), endDate: sandbox.addDays(T34, 8), status: '未开始', desc: '', color: '#165DFF', kind: 'task' });
+      const before34 = st34.milestones.find(m => m.id === 'c34t').date + '|' + st34.milestones.find(m => m.id === 'c34t').endDate;
+      const auditCnt34 = (st34._audit || []).length;
+      sandbox.pgDragCommit._noop = null; /* 占位：确认拖拽取消路径不落 pgDragCommit */
+      /* 模拟 pgDrag 状态机：真实进入拖拽中态再 Esc */
+      const fakeEv34 = { clientX: 100, clientY: 50, stopPropagation() {}, preventDefault() {}, currentTarget: { style: { left: '60px', width: '210px' } } };
+      sandbox.pgDrag(fakeEv34, 'c34t', 'move');
+      check('C34 行为：pgDrag 进入拖拽态（pgDragState 就位 + 3 监听挂载）', !!sandbox.pgDragState && sandbox.pgDragState.id === 'c34t', 'state missing');
+      sandbox.pgDragCancel({ key: 'Escape' });
+      check('C34 行为：Esc 后 pgDragState 清空', sandbox.pgDragState === null || sandbox.pgDragState === undefined, 'state not cleared');
+      check('C34 行为：Esc 取消不落数据（date/endDate 不变 + 无审计 + 无 toast 落盘）', st34.milestones.find(m => m.id === 'c34t').date + '|' + st34.milestones.find(m => m.id === 'c34t').endDate === before34 && (st34._audit || []).length === auditCnt34, 'data mutated');
+      /* 非 Esc 键不触发取消 */
+      sandbox.pgDrag(fakeEv34, 'c34t', 'move');
+      sandbox.pgDragCancel({ key: 'a' });
+      check('C34 行为：非 Esc 键不取消（拖拽态保持）', !!sandbox.pgDragState, 'canceled by other key');
+      sandbox.pgDragCancel({ key: 'Escape' }); /* 清理拖拽态 */
+      /* 3) 清理 */
+      st34.products = st34.products.filter(p => p.id !== 'c34p');
+      st34.milestones = st34.milestones.filter(m => m.productId !== 'c34p');
+    } catch (e) { check('C34 批次', false, e.message + ' | ' + String(e.stack).split('\n')[1]); }
+    pendingAsync--;
+  })();
+
+  function by31(sb, id) { return sb.state.milestones.find(m => m.id === id); }
 
 
 function finishRun() {

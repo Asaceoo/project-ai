@@ -246,6 +246,89 @@ class Api:
             return {'ok': False, 'reason': 'error:%r' % (ex,)}
 
 
+def _start_tray(window, ver):
+    """系统托盘（v1.0.52）：左键/双击 = 显示主窗口；右键菜单 = 显示主窗口 / 保存退出。
+    保存退出 = 先落盘后关窗，复用 closing 事件的落盘片段（flushPersist→saveLogs→flushStore）再
+    window.destroy()（destroy 不触发 confirm_close，无二次弹窗）。
+    红线：evaluate_js 有随机死锁前科（v1.0.29-31，见 start_backup_server 注释），因此落盘放在
+    守护线程并 3s join 超时——超时视为疑似死锁，立即 destroy + os._exit 兜底强退
+    （落盘未完成时还有 localStorage 镜像 + 5 分钟周期备份 + X 关闭路径的 closing 落盘三重兜底），
+    绝不挂住托盘线程。勿改回 js_api / 无超时等待。pystray/Pillow 缺失时降级为无托盘运行，不阻塞启动。"""
+    try:
+        import pystray
+        from PIL import Image, ImageDraw
+    except Exception as e:
+        print('[托盘] pystray/Pillow 不可用，降级为无托盘运行: %r' % (e,))
+        return None
+
+    def _load_img():
+        try:
+            img = Image.open(resource_path('app.ico')).convert('RGBA')
+            if img.width > 64:
+                img = img.resize((64, 64))
+            return img
+        except Exception:
+            # 图标缺失兜底：品牌蓝底 + 白色徽章对勾轮廓，保证托盘可创建
+            img = Image.new('RGBA', (64, 64), (22, 93, 255, 255))
+            d = ImageDraw.Draw(img)
+            d.rounded_rectangle([12, 12, 52, 52], radius=10, outline=(255, 255, 255, 255), width=4)
+            d.line([22, 33, 30, 42, 44, 24], fill=(255, 255, 255, 255), width=5,
+                   joint='curve')
+            return img
+
+    def _show(icon=None, item=None):
+        try:
+            window.restore()
+        except Exception:
+            pass
+        try:
+            window.show()
+        except Exception:
+            pass
+
+    def _save_exit(icon=None, item=None):
+        def _do():
+            for snippet in ('try{flushPersist()}catch(e){}', 'try{saveLogs()}catch(e){}',
+                            'try{flushStore()}catch(e){}'):
+                try:
+                    window.evaluate_js(snippet)
+                except Exception:
+                    pass
+            try:
+                window.destroy()
+            except Exception:
+                pass
+        t = threading.Thread(target=_do, daemon=True)
+        t.start()
+        t.join(timeout=3.0)
+        if t.is_alive():
+            print('[托盘] 落盘 evaluate_js 疑似死锁，保底强退')
+            try:
+                window.destroy()
+            except Exception:
+                pass
+            _t = threading.Timer(1.5, os._exit, args=(0,))
+            _t.daemon = True
+            _t.start()
+        try:
+            icon.stop()
+        except Exception:
+            pass
+
+    try:
+        menu = pystray.Menu(
+            pystray.MenuItem('显示主窗口', _show, default=True),
+            pystray.MenuItem('保存退出', _save_exit),
+        )
+        icon = pystray.Icon('SupplyDevLocal', icon=_load_img(),
+                            title='ACE 开发助手 v' + ver, menu=menu)
+    except Exception as e:
+        print('[托盘] 托盘创建失败，降级为无托盘运行: %r' % (e,))
+        return None
+    threading.Thread(target=icon.run, daemon=True).start()
+    return icon
+
+
 def main():
     if not acquire_single_instance():
         sys.exit(0)
@@ -294,9 +377,17 @@ def main():
             ev.closing += _closing_flush
         except Exception:
             pass
+    # 系统托盘（v1.0.52）：随窗口启动，失败自动降级（见 _start_tray 注释）
+    tray_icon = _start_tray(window, ver)
     # private_mode=False 关键：pywebview 默认 private_mode=True，WebView2 会走内存 profile，
     # IndexedDB/localStorage 重启即清空（C1 真机验证暴露的存量 bug）
     webview.start(storage_path=data_dir, private_mode=False, debug=False)
+    # X 关闭或托盘退出后：webview 主循环已结束，停掉托盘图标（残留图标会悬到鼠标划过才消失）
+    if tray_icon is not None:
+        try:
+            tray_icon.stop()
+        except Exception:
+            pass
 
 
 if __name__ == '__main__':
