@@ -26,3 +26,5 @@ bkport.js
 /*.png
 chrome_err.log
 file/
+__pycache__/
+*.pyc

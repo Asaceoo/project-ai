@@ -29,6 +29,26 @@ with open(VER_FILE, 'w', encoding='utf-8') as f:
     f.write(new_ver)
 print(f'[版本] {v} -> {new_ver}')
 
+# 文档版本号同步：docs 两本手册头部的「适用版本」与「最后更新」随构建自动递增
+# （正则按行首引用块匹配，只动头部一处；newline='' 保留原 CRLF/LF 行尾）
+import re, datetime
+_today = datetime.date.today().strftime('%Y-%m-%d')
+for _fn in ('docs/USER-GUIDE.md', 'docs/TECH-MANUAL.md'):
+    _fp = os.path.join(ROOT, _fn)
+    if not os.path.exists(_fp):
+        print(f'[文档] 跳过（不存在）：{_fn}')
+        continue
+    with open(_fp, 'r', encoding='utf-8', newline='') as f:
+        _t = f.read()
+    _t2 = re.sub(r'适用版本：v[\d.]+（构建时自动同步）', f'适用版本：v{new_ver}（构建时自动同步）', _t)
+    _t2 = re.sub(r'最后更新：\d{4}-\d{2}-\d{2}', f'最后更新：{_today}', _t2)
+    if _t2 != _t:
+        with open(_fp, 'w', encoding='utf-8', newline='') as f:
+            f.write(_t2)
+        print(f'[文档] 已同步：{_fn} -> v{new_ver} / {_today}')
+    else:
+        print(f'[文档] 无需变更：{_fn}')
+
 # 清理构建中间产物；dist/ 里的历史版本 exe 一律保留（不删除旧版本）
 p = os.path.join(ROOT, 'build')
 if os.path.exists(p):

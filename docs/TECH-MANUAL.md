@@ -1,6 +1,6 @@
 # SupplyDevLocal 技术手册（开发者向）
 
-> 适用版本：v1.0.48 ｜ 最后更新：2026-09-25
+> 适用版本：v1.0.51（构建时自动同步） ｜ 最后更新：2026-10-01
 > 面向后续维护/二次开发的工程师。使用说明见《用户文档》（USER-GUIDE.md）。
 
 ---
@@ -19,7 +19,7 @@
 │       ├─ GET  /verify?token=…（完整性校验）           │
 │       └─ GET  /ping                                  │
 │                                                     │
-│  supplydev.html（4253 行，原生 JS 单文件前端）        │
+│  supplydev.html（约 4500 行，原生 JS 单文件前端）      │
 │   ├─ state：内存单一数据源                           │
 │   ├─ persist() → recomputeDerived() → IndexedDB+LS   │
 │   └─ bkport.js（启动时生成：window.__BKPORT/__BKTOKEN）│
@@ -37,7 +37,7 @@
 | `build.py` | 一键打包：读 version.txt → 递增 → PyInstaller → 改名 exe |
 | `version.txt` | 版本号单一来源（如 `1.0.46`） |
 | `dist/SupplyDevLocal-vX.Y.Z.exe` | 发版产物（约 14.5MB） |
-| `_tests/verify.js` | Node DOM 桩回归测试（485 项断言） |
+| `_tests/verify.js` | Node DOM 桩回归测试（576 项断言） |
 | `_tests/deadbtn.js` | 静态死按钮审计（onclick 函数存在性） |
 | `_tests/c14_app_test.py` | 备份链路壳层回归（真实起服务 17 项） |
 | `docs/` | 本文档与用户文档 |
@@ -118,11 +118,16 @@ CSV 列定义集中在 `exportModule()` 的 `cfg` 对象（supplydev.html ~行 1
 - **分阶段用日期**：`projDueDate(p)`——立项中/打样中取 `sampleDue||targetDate`，其余状态取 `targetDate||sampleDue`（缺失自动回退）。
 - **交付同步**：`projDelivered(p)` 扫描 state.milestones 中该项目的「交付」基线里程碑是否已完成；消费点=项目汇总 KPI（已逾期/即将到期/本月到期）、`projStatusMatch`（__over/__soon7/__due30）、列表倒计时列、健康度徽章（rank2 绿 ✓ 已交付）、仪表盘本月到期、甘特图 `_pDeliv` 守卫。结转「已完工」仍为人工口径，`editMilestone` 仅 toast 提示不改状态。
 
+### 6.3 OTIF 与三档 AQL（v1.0.51 C20）
+
+- **OTIF（On-Time In-Full）**：`orderOTIFJudge(o)` 判定单笔订单——样本准入=存在分批（`o.batches`）且已足额收货（`orderReceivedQty(o)>=+o.qty`）；判定=每批 `received` 的实收日期 `b.receivedDate` 均不晚于该批承诺日期（P1 批次确认收货时埋点采集，零手工录入）。`otifStats()` 输出 `{rate, ontime, sample}` 全局聚合，消费点=订单页 KPI（≥95 绿 / 85-94 橙 / <85 红）、行内 `OTIF ✓/✕` 标注、供应商列表 per-supplier 汇总。**无分批订单不入样本**（无收货记录，无法判准时，防虚增）。
+- **三档 AQL 抽检**：`AQL_TABLE` 支持 `1.0/2.5/4.0` 三档（1.0 档为 ISO 2859-1 Table 2-A 双信源核对值，小批量走箭头级联 n=5/Ac=0）；抽检记录加 `badCr/badMaj/badMin` 三字段（兼容旧数据：旧记录读 `bad`）。判定顺序：致命>0 → 退货；否则主要按 AQL 1.0 查表、次要按 AQL 4.0 查表各自判收/拒，任一拒收 → 整批退货。`inspectionAQL()` 按批量实时预填抽检数并展示方案提示。
+
 ## 7. 测试体系（发布前全绿才算完成）
 
 | 工具 | 内容 | 命令 |
 |---|---|---|
-| verify.js | 465 项断言：Node DOM 桩真实执行全部脚本，含 CRUD 行为级、**全路由 onclick 语法审计**（`new Function` 逐个解析，拦截死按钮类语法错误）、周期备份三态、评分公式 | `node _tests/verify.js` |
+| verify.js | 576 项断言：Node DOM 桩真实执行全部脚本，含 CRUD 行为级、**全路由 onclick 语法审计**（`new Function` 逐个解析，拦截死按钮类语法错误）、周期备份三态、评分公式、OTIF 真值表、AQL 三档判定 | `node _tests/verify.js` |
 | deadbtn.js | 静态审计 onclick 引用的函数是否定义（**查不出语法错误**，不能替代上者） | `node _tests/deadbtn.js supplydev.html` |
 | c14_app_test.py | 备份壳层回归 | `python _tests/c14_app_test.py` |
 | Chrome 截图 | `--headless=new --screenshot` 真引擎渲染验证（登录守卫用**副本注入**，不改主文件） | 见 checklist |
@@ -173,3 +178,6 @@ CSV 列定义集中在 `exportModule()` 的 `cfg` 对象（supplydev.html ~行 1
 | v1.0.46 | C14 | **周期备份/备份校验/审计归档/搜索 12 类** |
 | v1.0.47 | C15 | **逾期终态修复/仪表盘逾期处理面板（collectOverdue+ovTip+OV_ACT 统一口径）/帮助中心板块（第 9 导航，Alt+1~9）** |
 | v1.0.48 | C16 | **仪表盘/项目汇总审查收敛：逾期口径八处对齐（orderDue+终态守卫）/客诉口径×4（待办/看板/详情/报表）/搜索口径与缺列防御/趋势柱归一化/饼图颜色补全/supScore 预计算** |
+| v1.0.49 | C17 | **goDrill 下钻闭环（KPI/趋势柱/饼图→订单/项目页带过滤）+ 项目汇总提效（逾期优先排序/健康度徽章/批量改状态·导出·删除级联）** |
+| v1.0.50 | C19 | **项目逾期口径细化：projDueState 单一出口 + projDueDate 分阶段用日期 + projDelivered 交付里程碑同步（真机数据实证 9 逾期→2 真+2 已交付+6 转绿）** |
+| v1.0.51 | C20 | **订单 OTIF 达成率（orderOTIFJudge/otifStats）+ 抽检三档 AQL 缺陷分级（Cr0/Maj1.0/Min4.0，GB/T 2828.1 查表判定）** |
