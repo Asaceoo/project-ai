@@ -2,6 +2,14 @@
 
 面向产品与供应链开发专员的轻量级桌面工具。数据与账号全部保存在本机，离线可用。
 
+<img width="3200" height="1929" alt="e72e297afe88d81b" src="https://github.com/user-attachments/assets/d428eba6-282f-412b-8c60-b138c211d3a9" />
+<img width="3200" height="1929" alt="885d3b425c35692d" src="https://github.com/user-attachments/assets/b0d6e596-153e-48a9-b56b-7af6712d7687" />
+<img width="3200" height="1896" alt="034a267e705daa55" src="https://github.com/user-attachments/assets/69ddaf17-d86f-4c94-962a-9c55d808034c" />
+<img width="3200" height="1929" alt="730b19f6f44f68f3" src="https://github.com/user-attachments/assets/0afcfa3b-c5c5-4bf4-9bca-a1226ecd0cc2" />
+<img width="3200" height="1929" alt="3d25c17d44f028ff" src="https://github.com/user-attachments/assets/b8fdfbcd-92cc-4187-8c50-a98fce6f519f" />
+
+
+
 ## 快速开始
 
 直接双击 `dist/SupplyDevLocal-vX.Y.Z.exe` 启动（文件名带版本号，每次打包自动递增，`dist/` 保留历史版本）。首次启动需创建本地账号（用户名+密码，仅保存在本机）。
